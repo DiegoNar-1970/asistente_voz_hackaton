@@ -2,9 +2,8 @@ services:
   - type: web
     name: vocal-cognitivo-api
     runtime: python
-    rootDir: back
-    buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    buildCommand: pip install -r back/requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT --app-dir back
     healthCheckPath: /api/health
     envVars:
       - key: GEMINI_API_KEY
