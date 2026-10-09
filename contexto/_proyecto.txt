@@ -1,0 +1,126 @@
+KOGNIA LABS   ·   HACKATÓN INTERNA
+RETO 01 — AGENTE VOCAL COGNITIVO
+Habla con cualquier documento, en tiempo real.
+Construye un agente conversacional por voz que reciba un documento cualquiera, lo indexe como su única fuente de conocimiento y permita hablar con él en vivo: explicando primero de qué trata y qué se le puede preguntar, respondiendo por voz con baja latencia, y mostrando en pantalla la transcripción diarizada y el análisis de sentimiento y emociones mientras ocurre la conversación.
+ | 
+EL ENTREGABLE FINAL ES UNA URL PÚBLICA FUNCIONANDO : https://forms.cloud.microsoft/r/HbR9EgTsNB
+ | 
+01  OBJETIVO DEL RETO
+Demostrar, en una demo en vivo de 10 minutos, que un conjunto de datos abierto consumido por API —la «Relación de IPS públicas y privadas según el nivel de atención y capacidad instalada», publicada en datos.gov.co— puede convertirse en un interlocutor: consumirlo, entenderlo y conversarlo por voz — con evidencia visible de lo que el sistema escucha (transcripción por hablante) y de cómo se está sintiendo la conversación.
+FUENTE DE DATOS OBLIGATORIA — API DE DATOS.GOV.CO
+Conjunto de datos: https://www.datos.gov.co/Salud-y-Protecci-n-Social/Relaci-n-de-IPS-p-blicas-y-privadas-seg-n-el-nivel/s2ru-bqt6/data_preview
+Cómo obtener el acceso:
+Registrarse e iniciar sesión en datos.gov.co.
+Abrir el conjunto de datos y, en el menú «Acciones», entrar a «API» (ventana «Exportar conjunto de datos» → pestaña «API de acceso»).
+Elegir formato JSON y versión SODA3, y copiar el endpoint (https://www.datos.gov.co/api/v3/views/s2ru-bqt6/query.json).
+La API SODA3 requiere autenticación: generar el token de aplicación desde el «Portal del desarrollador» con la cuenta registrada.
+Ojo: la API devuelve por defecto máximo 1.000 filas y el conjunto tiene más de 41.000, así que la solución debe paginar o filtrar las consultas.
+ | 
+02  MODALIDAD Y REGLAS
+CÓD.
+ | REGLA
+ | DETALLE
+ | 
+M01
+ | Individual o en equipo de máximo 3
+ | Se puede competir solo o en grupos de hasta 3 personas. Cada participante o equipo entrega una única URL.
+ | 
+M02
+ | API y modelo libres
+ | Cada quien elige proveedor y modelo (OpenAI, Gemini, Anthropic, Deepgram, ElevenLabs, Groq, Whisper…). No hay stack obligatorio.
+ | 
+M04
+ | Uso de IA y plantillas permitido
+ | Se puede usar código generado con IA, frameworks y plantillas. Debe declararse en el README.
+ | 
+M05
+ | Documento de prueba sorpresa
+ | El jurado entrega el documento el día de la evaluación. No se conoce con anticipación.
+ | 
+M06
+ | Costos de API
+ | Por cuenta del participante, salvo que la organización indique lo contrario.
+ | 
+M07
+ | Sin demo local
+ | La evaluación se hace desde la URL pública. Si la URL falla, hay un único reintento de 2 minutos.
+ | 
+03  ALCANCE OBLIGATORIO
+Los ocho requisitos deben funcionar en la URL pública.
+REQ.
+ | QUÉ DEBE HACER
+ | CRITERIO DE ACEPTACIÓN
+ | 
+R08
+ | Despliegue público
+ | Código en GitHub y despliegue accesible por URL (Vercel u otro). Debe correr sin instalación local.
+ | 
+04  ENTREGABLES
+CÓD.
+ | QUÉ SE ENTREGA
+ | NOTA
+ | 
+E01
+ | URL pública de la demo   ←  entregable principal
+ | Es lo que el jurado abre y califica. Se registra en la hoja «02 CRITERIOS».
+ | 
+E02
+ | URL del repositorio en GitHub
+ | Público, o con acceso otorgado a los jueces.
+ | 
+E03
+ | README de una página
+ | Stack, arquitectura, decisiones técnicas y qué se generó con IA.
+ | 
+05  GUION DE LA PRUEBA EN VIVO
+10 minutos por participante. Lo ejecuta el jurado desde la URL.
+PASO
+ | QUÉ OCURRE
+ | QUÉ OBSERVA EL JURADO
+ | 
+P1 · 1 min
+ | El jurado abre la URL pública desde su propio equipo.
+ | Que cargue sin errores y sin instalación.
+ | 
+P2 · 1 min
+ | Se carga un documento entregado por el jurado en ese momento.
+ | Que acepte el archivo y procese sin fallar.
+ | 
+P3 · 1 min
+ | El sistema indexa y presenta el brief del documento.
+ | Que explique de qué trata y sugiera entre 3 y 5 preguntas pertinentes.
+ | 
+P4 · 4 min
+ | Conversación por voz: tres preguntas del jurado — resumen, detalle fino y una fuera del documento.
+ | Fidelidad al documento, latencia, naturalidad y honestidad ante lo que no sabe.
+ | 
+P5 · 2 min
+ | Revisión de la transcripción diarizada y del panel de sentimiento y emociones.
+ | Separación correcta de hablantes y análisis actualizándose en vivo.
+ | 
+P6 · 1 min
+ | Preguntas del jurado sobre arquitectura y decisiones técnicas.
+ | Claridad del equipo sobre lo que construyó.
+ | 
+06  CÓMO SE CALIFICA
+Criterios y pesos en la hoja «02 CRITERIOS»; cada jurado califica en su propia hoja.
+PESO
+ | CRITERIO
+ | QUÉ SE EVALÚA
+ | 
+20 %
+ | Voz y latencia en tiempo real
+ | Calidad de STT/TTS, tiempo de respuesta, manejo de interrupciones y fluidez de la conversación hablada.
+ | 
+15 %
+ | Transcripción diarizada
+ | Precisión de la transcripción en vivo y separación correcta de hablantes con marca de tiempo.
+ | 
+10 %
+ | Despliegue y entregable
+ | Repositorio en GitHub, despliegue funcional y URL pública estable sin instalación local.
+ | 
+25 %
+ | UX, diseño y demo
+ | Claridad de la interfaz, calidad visual, robustez de la demo y narrativa de la presentación.
+ | 
