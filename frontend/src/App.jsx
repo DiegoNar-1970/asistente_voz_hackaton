@@ -7,6 +7,20 @@ const SALUDO_POR_DEFECTO =
   'Hola, ¿cómo estás? Soy la asistente virtual de la IPS. ' +
   'Dime en qué te puedo ayudar y en qué ciudad estás.'
 
+const EMOJI = {
+  alegria: '😊',
+  satisfaccion: '😌',
+  serenidad: '🧘',
+  curiosidad: '🤔',
+  confusion: '😕',
+  preocupacion: '😟',
+  ansiedad: '😰',
+  frustracion: '😖',
+  enojo: '😠',
+  tristeza: '😢',
+  neutral: '😐',
+}
+
 function hora() {
   return new Date().toLocaleTimeString('es-CO', {
     hour: '2-digit',
@@ -30,6 +44,9 @@ function App() {
   const reconocimientoRef = useRef(null)
   const transcripcionRef = useRef('')
   const enviarAlSoltarRef = useRef(false)
+  const interrumpidoRef = useRef(false)
+  const escuchandoRef = useRef(false)
+  const seguridadRef = useRef(null)
 
   const [brief, setBrief] = useState(null)
   const [inicio, setInicio] = useState(false)
@@ -43,6 +60,12 @@ function App() {
   const [escuchando, setEscuchando] = useState(false)
   const [error, setError] = useState('')
   const [vozActiva, setVozActiva] = useState(true)
+  const [analisis, setAnalisis] = useState(null)
+  const [emociones, setEmociones] = useState([])
+  const [horaEscucha, setHoraEscucha] = useState('')
+  const [documento, setDocumento] = useState(null)
+  const [subiendoDoc, setSubiendoDoc] = useState(false)
+  const archivoRef = useRef(null)
 
   const cargarInicial = useCallback(async () => {
     try {
@@ -63,17 +86,50 @@ function App() {
   }, [])
 
   useEffect(() => {
+    // Si el usuario sale del botón o el navegador no reporta el `pointerup`
+    // dentro de él, la sesión se cierra igual: nunca queda escuchando sola.
+    const alSoltar = () => {
+      const sesion = reconocimientoRef.current
+      if (!sesion) return
+      enviarAlSoltarRef.current = true
+      try {
+        sesion.stop()
+      } catch {
+        try {
+          sesion.abort()
+        } catch {
+          // Sesión ya cerrada.
+        }
+      }
+    }
+    window.addEventListener('pointerup', alSoltar)
+    window.addEventListener('pointercancel', alSoltar)
+    return () => {
+      window.removeEventListener('pointerup', alSoltar)
+      window.removeEventListener('pointercancel', alSoltar)
+      if (seguridadRef.current) clearTimeout(seguridadRef.current)
+    }
+  }, [])
+
+  useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- la carga inicial vive en la API
     cargarInicial()
   }, [cargarInicial])
 
   function decir(texto) {
     if (!('speechSynthesis' in window) || !vozActiva) return
+    if (interrumpidoRef.current) return
     const voz = new SpeechSynthesisUtterance(texto)
     voz.lang = 'es-CO'
     voz.rate = 1.05
     voz.pitch = 1
     window.speechSynthesis.speak(voz)
+  }
+
+  function callarVoz() {
+    // El usuario pulsó el micrófono: la asistente se queda callada.
+    interrumpidoRef.current = true
+    if ('speechSynthesis' in window) window.speechSynthesis.cancel()
   }
 
   function leerEnVozAlta(texto) {
@@ -89,7 +145,7 @@ function App() {
   }
 
   function hablarIncremental(texto, estado) {
-    if (!vozActiva) {
+    if (!vozActiva || interrumpidoRef.current) {
       estado.hablado = texto.length
       return
     }
@@ -103,10 +159,67 @@ function App() {
     }
   }
 
+  async function subirDocumento(archivo) {
+    if (!archivo) return
+    setSubiendoDoc(true)
+    setError('')
+    try {
+      const datos = new FormData()
+      datos.append('archivo', archivo)
+      const response = await fetch(`${API_URL}/api/documento`, {
+        method: 'POST',
+        body: datos,
+      })
+      const data = await response.json().catch(() => ({}))
+      if (!response.ok) {
+        throw new Error(
+          typeof data.detail === 'string'
+            ? data.detail
+            : 'No pude leer ese archivo.',
+        )
+      }
+      setDocumento(data)
+      if (data.preguntas && data.preguntas.length) setPreguntas(data.preguntas)
+      if (data.resumen) {
+        setBrief({
+          introduccion: `Ya indexé «${data.nombre}». ${data.resumen}`,
+        })
+      }
+    } catch (err) {
+      setError(err.message || 'No se pudo cargar el documento.')
+    } finally {
+      setSubiendoDoc(false)
+      if (archivoRef.current) archivoRef.current.value = ''
+    }
+  }
+
+  async function analizarEmocion(texto) {    // No bloquea la respuesta: corre en segundo plano.
+    try {
+      const response = await fetch(`${API_URL}/api/emotion`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ texto, rol: 'usuario' }),
+      })
+      if (!response.ok) return
+      const data = await response.json()
+      setAnalisis(data)
+      setEmociones((prev) => [
+        ...prev.slice(-6),
+        { ...data, hora: hora(), texto: texto.slice(0, 60) },
+      ])
+    } catch {
+      // El análisis es informativo: un fallo no interrumpe la conversación.
+    }
+  }
+
   async function enviarPregunta(texto = pregunta) {
     const textoPregunta = texto.trim()
 
-    if (!textoPregunta || cargandoRespuesta) return
+    if (!textoPregunta) return
+
+    // Una nueva pregunta corta lo anterior (interrupción del usuario).
+    interrumpidoRef.current = false
+    if ('speechSynthesis' in window) window.speechSynthesis.cancel()
 
     setPregunta('')
     setError('')
@@ -124,6 +237,8 @@ function App() {
     setCargandoRespuesta(true)
     setPensando(true)
     if ('speechSynthesis' in window) window.speechSynthesis.cancel()
+
+    analizarEmocion(textoPregunta)
 
     try {
       const response = await fetch(`${API_URL}/api/chat`, {
@@ -211,7 +326,15 @@ function App() {
       return
     }
 
-    if (cargandoRespuesta || !inicio || escuchando) return
+    if (!inicio) return
+
+    // Interrupción: el usuario habla mientras la asistente habla y la calla.
+    callarVoz()
+
+    // Siempre se parte de una sesión limpia. Antes una sesión que no llegaba
+    // a emitir onstart dejaba `escuchando` en true y el botón quedaba pegado
+    // en la siguiente pregunta.
+    limpiarSesion()
 
     const reconocimiento = new SpeechRecognition()
     reconocimiento.lang = 'es-CO'
@@ -223,7 +346,9 @@ function App() {
     enviarAlSoltarRef.current = false
 
     reconocimiento.onstart = () => {
+      escuchandoRef.current = true
       setEscuchando(true)
+      setHoraEscucha(hora())
       setError('')
     }
 
@@ -243,7 +368,15 @@ function App() {
     }
 
     reconocimiento.onend = () => {
+      escuchandoRef.current = false
       setEscuchando(false)
+      if (seguridadRef.current) {
+        clearTimeout(seguridadRef.current)
+        seguridadRef.current = null
+      }
+      if (reconocimientoRef.current === reconocimiento) {
+        reconocimientoRef.current = null
+      }
       if (enviarAlSoltarRef.current) {
         enviarAlSoltarRef.current = false
         const texto = transcripcionRef.current.trim()
@@ -260,15 +393,64 @@ function App() {
     try {
       reconocimiento.start()
     } catch {
+      escuchandoRef.current = false
       setEscuchando(false)
+      reconocimientoRef.current = null
       setError('No se pudo iniciar el micrófono. Inténtalo de nuevo.')
+      return
+    }
+
+    // Red de seguridad: si el navegador no emite `onend`, se corta solo.
+    seguridadRef.current = setTimeout(() => {
+      if (reconocimientoRef.current === reconocimiento) {
+        try {
+          reconocimiento.abort()
+        } catch {
+          // Si ya no existe, no hay nada que limpiar.
+        }
+      }
+    }, 20000)
+  }
+
+  function limpiarSesion() {
+    const previo = reconocimientoRef.current
+    if (!previo) return
+    // Se anulan los callbacks para que la sesión vieja no dispare eventos.
+    previo.onstart = null
+    previo.onresult = null
+    previo.onerror = null
+    previo.onend = null
+    try {
+      previo.abort()
+    } catch {
+      // Sesión ya cerrada.
+    }
+    reconocimientoRef.current = null
+    escuchandoRef.current = false
+    setEscuchando(false)
+    if (seguridadRef.current) {
+      clearTimeout(seguridadRef.current)
+      seguridadRef.current = null
     }
   }
 
   function soltarDictado() {
-    if (!escuchando) return
+    if (!escuchandoRef.current && !reconocimientoRef.current) return
     enviarAlSoltarRef.current = true
-    reconocimientoRef.current?.stop()
+    const sesion = reconocimientoRef.current
+    if (!sesion) {
+      enviarAlSoltarRef.current = false
+      return
+    }
+    try {
+      sesion.stop()
+    } catch {
+      try {
+        sesion.abort()
+      } catch {
+        // Sesión ya cerrada.
+      }
+    }
   }
 
   return (
@@ -307,6 +489,42 @@ function App() {
 
       <section className="workspace">
         <aside className="sidebar">
+          <div className="doc-card">
+            <div className="doc-head">
+              <span className="doc-icon">📄</span>
+              <div>
+                <strong>Documento</strong>
+                <p>Carga un PDF, DOCX o TXT y pregúntale.</p>
+              </div>
+            </div>
+
+            <input
+              ref={archivoRef}
+              type="file"
+              accept=".pdf,.docx,.txt,.csv,.md"
+              onChange={(event) => subirDocumento(event.target.files?.[0])}
+              hidden
+            />
+
+            {documento?.cargado ? (
+              <div className="doc-ok">
+                <span className="doc-ok-name">✓ {documento.nombre}</span>
+                <span className="doc-ok-meta">
+                  {documento.caracteres?.toLocaleString('es-CO')} caracteres
+                </span>
+              </div>
+            ) : (
+              <button
+                type="button"
+                className="primary-button doc-button"
+                onClick={() => archivoRef.current?.click()}
+                disabled={subiendoDoc}
+              >
+                {subiendoDoc ? 'Indexando…' : 'Cargar documento'}
+              </button>
+            )}
+          </div>
+
           <div className="section-heading">
             <span className="step-number">01</span>
             <div>
@@ -398,6 +616,18 @@ function App() {
                   <p className="thinking">Pensando…</p>
                 </div>
               )}
+
+              {escuchando && (
+                <div className="message usuario en-vivo">
+                  <span className="message-label">
+                    Tú · transcribiendo
+                    <span className="message-time">{horaEscucha}</span>
+                  </span>
+                  <p className="transcripcion-viva">
+                    {pregunta || 'Escuchando…'}
+                  </p>
+                </div>
+              )}
             </div>
 
             {inicio && sugerencias.length > 0 && mensajes.length <= 1 && (
@@ -432,9 +662,9 @@ function App() {
                 onPointerUp={soltarDictado}
                 onPointerLeave={soltarDictado}
                 onPointerCancel={soltarDictado}
-                disabled={cargandoRespuesta || !inicio}
+                disabled={!inicio}
                 aria-label="Mantén pulsado para hablar"
-                title="Mantén pulsado para hablar"
+                title="Mantén pulsado para hablar (corta a la asistente)"
               >
                 🎙
               </button>
@@ -449,13 +679,13 @@ function App() {
                       ? 'Escuchando… habla y suelta el botón'
                       : 'Mantén pulsado el micrófono y habla…'
                 }
-                disabled={cargandoRespuesta || !inicio}
+                disabled={!inicio}
                 aria-label="Tu mensaje"
               />
               <button
                 className="send-button"
                 type="submit"
-                disabled={!pregunta.trim() || cargandoRespuesta || !inicio}
+                disabled={!pregunta.trim() || !inicio}
                 aria-label="Enviar"
               >
                 ↑
@@ -492,6 +722,118 @@ function App() {
                 ),
               )}
             </div>
+          </section>
+
+          <section className="summary-section">
+            <div className="section-heading">
+              <span className="step-number">04</span>
+              <div>
+                <h2>Sentimiento de la conversación</h2>
+                <p>Cómo te sientes mientras hablamos.</p>
+              </div>
+            </div>
+
+            {!analisis ? (
+              <div className="empty-state compact">
+                <span className="spinner" />
+                <strong>Esperando tu primer mensaje</strong>
+              </div>
+            ) : (
+              <>
+                <div className="analysis-card">
+                  <div className="analysis-top">
+                    <span className="analysis-emoji">
+                      {EMOJI[analisis.emocion] || '😐'}
+                    </span>
+                    <div>
+                      <strong className="analysis-emotion">
+                        {analisis.emocion}
+                      </strong>
+                      <span className={`analysis-mood ${analisis.sentimiento}`}>
+                        {analisis.sentimiento}
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="analysis-gauge">
+                    <div
+                      className={`analysis-gauge-fill ${analisis.sentimiento}`}
+                      style={{
+                        width: `${Math.round(
+                          (analisis.intensidad || 0) * 100,
+                        )}%`,
+                      }}
+                    />
+                  </div>
+
+                  <p className="analysis-detail">
+                    {analisis.explicacion || 'Sin observaciones.'}
+                  </p>
+                </div>
+
+                {emociones.length > 0 && (
+                  <ul className="emotion-timeline">
+                    {emociones
+                      .slice()
+                      .reverse()
+                      .map((item, index) => (
+                        <li key={`${index}-${item.hora}`}>
+                          <span className="timeline-emoji">
+                            {EMOJI[item.emocion] || '😐'}
+                          </span>
+                          <span className="timeline-text">{item.texto}</span>
+                          <span className="timeline-time">{item.hora}</span>
+                        </li>
+                      ))}
+                  </ul>
+                )}
+              </>
+            )}
+          </section>
+
+          <section className="summary-section">
+            <div className="section-heading">
+              <span className="step-number">05</span>
+              <div>
+                <h2>Transcripción diarizada</h2>
+                <p>Hablante y marca de tiempo de cada turno.</p>
+              </div>
+            </div>
+
+            {mensajes.filter((m) => m.texto).length === 0 ? (
+              <div className="empty-state compact">
+                <strong>Aún no hay turnos</strong>
+              </div>
+            ) : (
+              <div className="diarized-wrap">
+                <div className="diarized-head">
+                  <span>Hablante</span>
+                  <span>Hora</span>
+                </div>
+                <ul className="diarized-list">
+                  {mensajes
+                    .filter((m) => m.texto)
+                    .slice(-8)
+                    .map((m, index) => (
+                      <li key={`d-${index}-${m.hora}`}>
+                        <span className={`speaker-tag ${m.rol}`}>
+                          {m.rol === 'usuario' ? 'Tú' : 'Asistente'}
+                        </span>
+                        <span className="diarized-time">{m.hora}</span>
+                        <p className="diarized-text">
+                          {m.texto.slice(0, 110)}
+                          {m.texto.length > 110 ? '…' : ''}
+                        </p>
+                      </li>
+                    ))}
+                </ul>
+                {escuchando && (
+                  <div className="diarized-live">
+                    <span className="rec-dot" /> En vivo · {horaEscucha}
+                  </div>
+                )}
+              </div>
+            )}
           </section>
         </div>
       </section>

@@ -1,13 +1,15 @@
+import io
 import json
 import os
 import queue
+import random
 import re
 import threading
 import unicodedata
 
 import httpx
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from google import genai
@@ -84,6 +86,106 @@ class PreguntaRequest(BaseModel):
 class TextoRequest(BaseModel):
     texto: str
     rol: str = "usuario"
+
+
+# ------------------------------------------------------------ documento cargado
+# El documento no reemplaza la fuente de datos: se agrega como contenido sobre
+# el que también se puede preguntar (reto, paso P2 y P3).
+DOCUMENTO: dict = {}
+TOPE_DOCUMENTO = 9000
+
+
+def _leer_documento(nombre: str, datos: bytes) -> str:
+    """Extrae el texto de PDF, DOCX, TXT o CSV."""
+    bajo = (nombre or "").lower()
+    if bajo.endswith(".pdf"):
+        import pypdf
+
+        lector = pypdf.PdfReader(io.BytesIO(datos))
+        texto = "\n".join(
+            (pagina.extract_text() or "") for pagina in lector.pages
+        )
+    elif bajo.endswith(".docx"):
+        import docx
+
+        archivo = docx.Document(io.BytesIO(datos))
+        texto = "\n".join(p.text for p in archivo.paragraphs)
+    else:
+        texto = datos.decode("utf-8", errors="replace")
+
+    texto = re.sub(r"[ \t]+", " ", texto)
+    texto = re.sub(r"\n{3,}", "\n\n", texto).strip()
+    if not texto:
+        raise HTTPException(
+            status_code=400,
+            detail="No pude leer texto de ese archivo. Prueba con PDF, DOCX o TXT.",
+        )
+    return texto[:TOPE_DOCUMENTO]
+
+
+def contexto_documento() -> str:
+    """Bloque de texto para los prompts cuando hay un documento cargado."""
+    if not DOCUMENTO.get("texto"):
+        return ""
+    return (
+        f"\n\nDOCUMENTO CARGADO POR EL USUARIO ({DOCUMENTO['nombre']}):\n"
+        f"{DOCUMENTO['texto'][:TOPE_DOCUMENTO]}\n"
+    )
+
+
+def resumen_documento() -> str:
+    if not DOCUMENTO.get("texto"):
+        return ""
+    return DOCUMENTO.get("resumen") or ""
+
+
+DOC_CLAVES = (
+    "documento", "archivo", "pdf", "docx", "word", "informe", "texto",
+    "pagina", "parrafo", "seccion", "resumen", "de que trata", "seg",
+    "menciona", "encabeza", "conclusion", "capitulo", "anexo", "adjunto",
+)
+
+
+def _pregunta_del_documento(texto: str) -> bool:
+    """Decide si la pregunta va dirigida al documento cargado (P4 del guion).
+
+    El documento NO es la fuente de verdad: solo se usa cuando el usuario
+    habla de él o cuando la pregunta comparte términos con su contenido.
+    """
+    if not DOCUMENTO.get("texto"):
+        return False
+    if any(clave in texto for clave in DOC_CLAVES):
+        return True
+    if len(texto) < 12:
+        return False
+    palabras_documento = set(
+        re.findall(r"[a-z]{5,}", normalizar(DOCUMENTO["texto"])[:4000])
+    )
+    palabras_pregunta = set(re.findall(r"[a-z]{5,}", texto))
+    return len(palabras_documento & palabras_pregunta) >= 2
+
+
+def prompt_documento(pregunta: str, historial: str) -> str:
+    return f"""Acompañas a un usuario que cargó un documento. Tu tarea es
+responder preguntas sobre él.
+
+REGLAS:
+- Responde SOLO con información que esté en el DOCUMENTO.
+- Si la respuesta no está en el documento, dilo con naturalidad. No inventes.
+- Entre 2 y 4 frases. Sin markdown, sin asteriscos, sin emojis, en español.
+  Sé breve: mejor una respuesta corta.
+- NO saludes ni empieces con "Hola".
+- Cierra con UNA frase que haga avanzar la conversación: una pregunta breve
+  sobre el documento o un consejo práctico. NO uses "¿Hay algo más en que te
+  pueda ayudar?". Ejemplos: "Si quieres, te resumo el punto 3.",
+  "¿Te leo la sección de conclusiones?"
+
+CONVERSACIÓN PREVIA:
+{historial or "(sin turnos previos)"}
+
+PREGUNTA DEL USUARIO: {pregunta}
+{contexto_documento()}
+"""
 
 
 def normalizar(texto: str) -> str:
@@ -350,6 +452,7 @@ def _startup():
 SERVICIOS = [
     ("urgencias", ["urgencia", "urgencias"]),
     ("camas", ["cama", "camas", "hospitalizacion", "internacion"]),
+    ("hospitales", ["hospital", "hospitales"]),
     ("partos", ["parto", "partos", "obstetricia", "embarazo", "natal"]),
     ("consulta externa", ["consulta externa", "consulta", "cita"]),
     ("cirugia", ["cirugia", "quirurgico"]),
@@ -368,6 +471,7 @@ SERVICIOS = [
 SERVICIO_WHERE = {
     "urgencias": "UPPER(nom_descripcion_capacidad) LIKE '%URGENCIAS%'",
     "camas": "nom_grupo_capacidad='CAMAS'",
+    "hospitales": "UPPER(nom_sede_ips) LIKE '%HOSPITAL%'",
     "partos": "UPPER(nom_descripcion_capacidad) LIKE '%PARTO%'",
     "consulta externa": "UPPER(nom_descripcion_capacidad) LIKE '%CONSULTA%'",
     "cirugia": "UPPER(nom_descripcion_capacidad) LIKE '%CIRUG%'",
@@ -427,11 +531,47 @@ REPLICAS_RAPIDAS = {
 }
 
 
+PALABRAS_SALUDO = {
+    "hola", "holi", "hey", "oye", "buenas", "buenos", "dias", "tardes",
+    "noches", "que", "mas", "como", "estas", "todo", "bien", "saludos",
+}
+
+
+PEDIR_CIUDAD = re.compile(
+    r"\s*[,;]?\s*(y|e)?\s*(dime en qu[ée] ciudad est[áa]s[^.]*\.|"
+    r"cu[ée]ntame en qu[ée] ciudad est[áa]s[^.]*\.|"
+    r"¿?en qu[ée] ciudad est[áa]s[^?]*¿?\?)",
+    re.I,
+)
+
+
+def _sin_pedir_ciudad(texto: str) -> str:
+    """Quita el pedir la ciudad cuando ya la sabemos."""
+    limpio = PEDIR_CIUDAD.sub("", texto).strip()
+    limpio = re.sub(r"\s+([.,;])", r"\1", limpio)
+    limpio = re.sub(r"\s{2,}", " ", limpio).rstrip(" ,")
+    if limpio and limpio[-1] not in ".!?":
+        limpio += "."
+    return limpio or texto
+
+
 def respuesta_rapida(texto: str) -> str | None:
     texto = texto.strip().rstrip("!.¿¡")
     texto = normalizar(texto).strip()
     if texto in REPLICAS_RAPIDAS:
         return REPLICAS_RAPIDAS[texto]
+
+    # Saludos pegados o con adornos: "Hola, buenas", "Buenas, ¿cómo estás?".
+    # Solo cuando TODAS las palabras son de saludo, para no interferir con
+    # preguntas reales ("hola, hospitales en Cali").
+    palabras = texto.split()
+    if (
+        palabras
+        and len(palabras) <= 5
+        and all(palabra in PALABRAS_SALUDO for palabra in palabras)
+    ):
+        return REPLICAS_RAPIDAS.get(texto) or REPLICAS_RAPIDAS["hola"]
+
     return None
 
 
@@ -524,6 +664,15 @@ def texto_fuera_de_alcance() -> str:
     )
 
 
+CONSEJOS_CONTEO = [
+    " ¿Quieres las direcciones?",
+    " ¿Te muestro las dos más cercanas?",
+    " ¿Te doy los teléfonos de contacto?",
+    " ¿Comparo con las de tu aseguradora?",
+    "",
+]
+
+
 def contar_respuesta(total: int, lugar: str, que: str, camas: bool = False) -> str:
     if total == 0:
         return (
@@ -531,10 +680,16 @@ def contar_respuesta(total: int, lugar: str, que: str, camas: bool = False) -> s
             "Prueba con otra ciudad o con otro servicio."
         )
     if camas:
-        return f"En {lugar} hay {total} camas registradas."
-    if que == "sedes de IPS":
-        return f"En {lugar} encontré {total} sedes de IPS."
-    return f"En {lugar} hay {total} sedes que ofrecen {que}."
+        base = f"En {lugar} hay {total} camas registradas."
+    elif que == "hospitales":
+        base = f"En {lugar} hay {total} hospitales registrados."
+    elif que == "sedes de IPS":
+        base = f"En {lugar} encontré {total} sedes de IPS."
+    else:
+        base = f"En {lugar} hay {total} sedes que ofrecen {que}."
+    # Los conteos responden con una consulta directa (sin LLM): aquí se
+    # agrega el siguiente paso para que la conversación no quede en seco.
+    return f"{base}{random.choice(CONSEJOS_CONTEO)}"
 
 
 def _consultar_conteo(lugar: dict, servicio: str | None) -> tuple[int, str, bool]:
@@ -569,8 +724,16 @@ def _consultar_conteo(lugar: dict, servicio: str | None) -> tuple[int, str, bool
 
 # ---------------------------------------------------------------- prompts
 
-def prompt_redaccion(pregunta, historial, filas, ciudad, servicio, recordada=False) -> str:
-    origen = " (la indicaste antes en la conversación)" if recordada else ""
+def prompt_redaccion(
+    pregunta, historial, filas, ciudad, servicio, recordada=False, extra=""
+) -> str:
+    memoria_aviso = (
+        "\n- La ciudad es un dato de contexto para ti. Úsala para responder, "
+        "pero NO la anuncies ni digas frases como 'recuerdo que estás en' ni "
+        "'como indicaste'. Simplemente responde con normalidad."
+        if recordada
+        else ""
+    )
     return f"""
 Eres la asistente virtual de salud de una IPS en Colombia. Hablas en español,
 cercana y humana, como si ayudaras a una persona por voz.
@@ -578,34 +741,43 @@ cercana y humana, como si ayudaras a una persona por voz.
 REGLAS ESTRICTAS:
 - Solo puedes informar lo que aparece en los RESULTADOS. No inventes nombres,
   direcciones, teléfonos ni cantidades.
-- No des diagnósticos, medicamentos ni consejos médicos.
+- No des diagnósticos ni medicamentos. Un consejo práctico (llamar antes de ir,
+  verificar horarios, traer la cédula o la carnetización) sí está permitido.
 - Si el dato no está en los RESULTADOS, dilo con naturalidad.
-- Entre 2 y 4 frases. Sin markdown, sin asteriscos, sin viñetas, sin emojis.
+- Entre 2 y 4 frases en total y máximo 60 palabras. Da como mucho 2 o 3
+  sedes de ejemplo: es mejor una respuesta corta que una larga. Sin markdown,
+  sin asteriscos, sin viñetas, sin emojis.
 - Responde SIEMPRE en español.
 - IMPORTANTE: NO vuelvas a saludar. No empieces con "Hola", "Buenos días",
   "Claro que sí" ni frases de cortesía vacías. Ya hubo un saludo al inicio.
   Ve directo al contenido de la respuesta.
-- Termina con una frase de cortesía natural como "¿Hay algo más en que te
-  pueda ayudar?".
-- Si la ciudad fue recordada de una conversación anterior, puedes mencionarlo
-  con naturalidad (por ejemplo "recuerdo que estás en Medellín").
-
+- Para cerrar, NO uses "¿Hay algo más en que te pueda ayudar?". Termina con
+  UNA frase que haga avanzar la conversación: una pregunta breve sobre lo
+  siguiente que le pueda servir, o un consejo práctico corto. Varía siempre.
+  Ejemplos: "Si quieres te busco las que atiendan de noche.",
+  "Te recomiendo llamar antes de ir para confirmar horario.",
+  "¿Quieres que te compare con las de tu aseguradora?"
+- Si la pregunta tiene varias partes (por ejemplo "¿cuántos hay? y dame la
+  dirección"), responde TODAS las partes, no solo una. Si pide 1 o 2
+  ejemplos, da exactamente esa cantidad.
+{memoria_aviso}
 CONVERSACIÓN PREVIA:
 {historial or "(sin turnos previos)"}
 
 PREGUNTA DEL USUARIO: {pregunta}
-CIUDAD: {ciudad}{origen}
+CIUDAD: {ciudad}
 SERVICIO BUSCADO: {servicio or "no especificado"}
 
 RESULTADOS ({len(filas)} filas):
 {json.dumps(filas[:10], ensure_ascii=False)}
+{extra}
 """
 
 
 def prompt_plan(pregunta: str, historial: str, memoria: str = "") -> str:
     contexto = (
-        f"CIUDAD QUE EL USUARIO YA INDICÓ (la recuerdas, no vuelvas a pedirla): "
-        f"{memoria}\n"
+        f"CONTEXTO: el usuario ya indicó que está en {memoria}. Úsalo si hace "
+        "falta, pero no lo menciones ni digas que lo recuerdas.\n"
         if memoria
         else ""
     )
@@ -659,8 +831,105 @@ def greeting():
 BRIEF_CACHE = {"data": None}
 
 
+@app.get("/api/documento")
+def documento_estado():
+    if not DOCUMENTO.get("texto"):
+        return {"cargado": False}
+    return {
+        "cargado": True,
+        "nombre": DOCUMENTO.get("nombre", ""),
+        "resumen": DOCUMENTO.get("resumen", ""),
+        "caracteres": len(DOCUMENTO.get("texto", "")),
+    }
+
+
+@app.post("/api/documento")
+async def documento_subir(archivo: UploadFile = File(...)):
+    """Paso P2 del guion: el jurado entrega un documento en ese momento."""
+    datos = await archivo.read()
+    if len(datos) > 5 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="El archivo supera 5 MB.")
+    if not datos:
+        raise HTTPException(status_code=400, detail="El archivo está vacío.")
+
+    texto = _leer_documento(archivo.filename or "", datos)
+    previo = texto[:2500]
+
+    def _reservado() -> str:
+        return " ".join(previo.split()[:60]) + "…"
+
+    resumen = gemini_o_respaldo(
+        "Resume en máximo 3 frases de qué trata este documento. Luego sugiere "
+        "4 preguntas que un jurado podría hacerle sobre él. Responde solo con "
+        'JSON {"resumen":"...","preguntas":["...","..."]}. TEXTO:\n' + previo,
+        json.dumps(
+            {
+                "resumen": _reservado(),
+                "preguntas": [
+                    "¿De qué trata el documento?",
+                    "¿Cuáles son sus puntos principales?",
+                    "¿Qué datos relevantes menciona?",
+                    "¿Cuál es su conclusión?",
+                ],
+            },
+            ensure_ascii=False,
+        ),
+    )
+
+    try:
+        datos_brief = json.loads(limpiar_json(resumen))
+        resumen_texto = str(datos_brief.get("resumen") or _reservado())
+        preguntas = [str(p) for p in (datos_brief.get("preguntas") or [])][:5]
+    except (json.JSONDecodeError, ValueError):
+        resumen_texto = _reservado()
+        preguntas = []
+
+    DOCUMENTO.clear()
+    DOCUMENTO.update(
+        {
+            "nombre": archivo.filename or "documento",
+            "texto": texto,
+            "resumen": resumen_texto,
+            "preguntas": preguntas,
+        }
+    )
+
+    return {
+        "cargado": True,
+        "nombre": DOCUMENTO["nombre"],
+        "resumen": resumen_texto,
+        "preguntas": preguntas,
+        "caracteres": len(texto),
+    }
+
+
+@app.delete("/api/documento")
+def documento_quitar():
+    DOCUMENTO.clear()
+    return {"cargado": False}
+
+
 @app.get("/api/brief")
 def brief():
+    # Documento cargado: el jurado pide que explique de qué trata (P3).
+    if DOCUMENTO.get("texto"):
+        preguntas = DOCUMENTO.get("preguntas") or []
+        if len(preguntas) < 3:
+            preguntas = [
+                "¿De qué trata el documento?",
+                "¿Qué información principal contiene?",
+                "¿Qué datos o cifras menciona?",
+                "¿Cuáles son sus conclusiones?",
+            ]
+        return {
+            "introduccion": (
+                f"Listo, ya indexé «{DOCUMENTO.get('nombre', 'el documento')}». "
+                f"{DOCUMENTO.get('resumen', '')}"
+            ),
+            "preguntas_sugeridas": preguntas[:5],
+            "documento": DOCUMENTO.get("nombre", ""),
+        }
+
     if BRIEF_CACHE["data"] is None:
         BRIEF_CACHE["data"] = {
             "introduccion": (
@@ -724,12 +993,43 @@ def extraer_memoria(historial: list[dict]) -> dict:
     return memoria
 
 
+CIERRES = [
+    "",
+    " ¿Quieres que te busque las que atiendan de noche?",
+    " Te recomiendo llamar antes de ir para confirmar el horario.",
+    " ¿Te muestro otras opciones en la misma ciudad?",
+    " Si quieres, te doy los teléfonos de esas sedes.",
+    " ¿Comparo con las de tu aseguradora?",
+    " Recuerda llevar tu cédula y la carnetización.",
+    " ¿Te parece si buscamos algo más cercano a ti?",
+    " Puedo filtrar por las que estén abiertas ahora.",
+    "",
+]
+
+
 def _cierre(texto: str) -> str:
-    """Añade la cortesía de cierre que mejora la atención al cliente."""
+    """Cierre de continuidad: sugiere el siguiente paso o da un consejo.
+
+    A veces se omite para no repetir la misma fórmula en cada respuesta.
+    """
     texto = texto.strip()
-    if re.search(r"ay algo m[áa]s|en que te pueda ayudar|en qu[ée] m[áa]s", texto, re.I):
+    if re.search(
+        r"ay algo m[áa]s|en que te pueda ayudar|en qu[ée] m[áa]s|"
+        r"te puedo ayudar con algo m[áa]s|necesitas algo m[áa]s|"
+        r"quiere que te busque|quiere que te muestre|te busco|te muestro|"
+        r"quieres las direcciones|te muestro las dos|te doy los tel[ée]fonos",
+        texto,
+        re.I,
+    ):
         return texto
-    return f"{texto} ¿Hay algo más en que te pueda ayudar?"
+    if texto and texto[-1] not in ".!?":
+        texto += "."
+    # Cortesía de longitud: nadie quiere escuchar una respuesta interminable.
+    if len(texto) > 430:
+        trozo = texto[:430]
+        corte = max(trozo.rfind(". "), trozo.rfind(", "))
+        texto = (trozo[:corte] if corte > 220 else trozo).rstrip() + "…"
+    return f"{texto}{random.choice(CIERRES)}"
 
 
 def _datos_lugar(lugar: dict, servicio: str | None) -> tuple[list, str]:
@@ -769,9 +1069,30 @@ def chat(datos: PreguntaRequest):
 
     # 1) Respuestas inmediatas sin red ni Gemini (saludos, gracias...).
     rapida = respuesta_rapida(entrada)
+    if rapida and memoria["lugar"]:
+        # Ya conoce la ciudad: no volver a pedirla.
+        rapida = _sin_pedir_ciudad(rapida)
     if rapida:
         return StreamingResponse(
             iter([limpiar_markdown(rapida)]),
+            media_type="text/plain; charset=utf-8",
+        )
+
+    # 2) Documento cargado: si la pregunta va por él, respondemos con él.
+    if _pregunta_del_documento(entrada):
+        respaldo_doc = _cierre(
+            f"Según «{DOCUMENTO.get('nombre', 'el documento')}»: "
+            f"{DOCUMENTO.get('resumen', 'no pude resumirlo.')}"
+        )
+        return StreamingResponse(
+            (
+                limpiar_markdown(t, trim=False)
+                for t in stream_con_recurso(
+                    prompt_documento(pregunta, historial_texto),
+                    respaldo_doc,
+                    espera=5.0,
+                )
+            ),
             media_type="text/plain; charset=utf-8",
         )
 
@@ -783,18 +1104,37 @@ def chat(datos: PreguntaRequest):
         recordada = True
 
     servicio = detectar_servicio(entrada)
-    if servicio is None and memoria["servicio"] and recordada:
+    # Solo se hereda el servicio de un turno anterior si la nueva pregunta no
+    # habla de otra cosa (si pregunta por IPS, no debe responder con camas).
+    menciona_entidad = bool(
+        re.search(
+            r"\bips+|\bsedes?\b|\bhospitales?\b|\binstituciones?\b|"
+            r"\bclinicas?\b|\bestablecimientos?\b|\bproveedores?\b",
+            entrada,
+        )
+    )
+    if servicio is None and memoria["servicio"] and recordada and not menciona_entidad:
         # Seguimiento ("¿cuántas camas hay?") sin repetir el servicio.
         servicio = memoria["servicio"]
 
     pide_conteo = bool(re.search(r"\bcu[ánta]nt[oa]s?\b|\btotal\b", entrada))
+    # Conteo compuesto: pide además direcciones, nombres o listado.
+    # En ese caso el atajo solo con el número no alcanza.
+    solo_conteo = pide_conteo and not bool(
+        re.search(
+            r"\bd[áa]me\b|\bdirecci|\bmu[ée]str|\blist[ao]|\bcu[áa]l(?:es)?\b|"
+            r"\bnombre|\bc[óo]mo llego\b|\bd[óo]nde\b|\by dame\b|\btambi[ée]n\b|"
+            r"\binclu(?:ye|ya)\b|\bpara ver\b|\bde ellas\b|\bde ellos\b",
+            entrada,
+        )
+    )
 
     # 2) Camino directo: ya sabemos la ciudad, consultamos y redactamos.
     if lugar:
         ciudad = lugar["valor"].title()
 
-        # Conteos: una sola consulta agregada y respuesta inmediata.
-        if pide_conteo:
+        # Conteos puros: una sola consulta agregada y respuesta inmediata.
+        if solo_conteo:
             try:
                 total, etiqueta, es_camas = _consultar_conteo(lugar, servicio)
             except HTTPException as error:
@@ -804,7 +1144,7 @@ def chat(datos: PreguntaRequest):
                 )
             texto = contar_respuesta(total, ciudad, etiqueta, es_camas)
             return StreamingResponse(
-                iter([_cierre(texto)]),
+                iter([texto]),
                 media_type="text/plain; charset=utf-8",
             )
 
@@ -815,6 +1155,16 @@ def chat(datos: PreguntaRequest):
                 iter([error.detail]),
                 media_type="text/plain; charset=utf-8",
             )
+
+        # Conteo compuesto: damos a Gemini las filas Y el número exacto.
+        extra_conteo = ""
+        if pide_conteo:
+            try:
+                total, etiqueta, es_camas = _consultar_conteo(lugar, servicio)
+                if total:
+                    extra_conteo = f"\nTOTAL EXACTO de {etiqueta}: {total}."
+            except HTTPException:
+                extra_conteo = ""
 
         if not filas:
             texto = (
@@ -828,7 +1178,8 @@ def chat(datos: PreguntaRequest):
             )
 
         prompt = prompt_redaccion(
-            pregunta, historial_texto, filas, ciudad, servicio, recordada
+            pregunta, historial_texto, filas, ciudad, servicio, recordada,
+            extra_conteo,
         )
         respaldo = _cierre(texto_con_servicios(
             filas, ciudad, servicio or "atención médica"
@@ -914,7 +1265,7 @@ def chat(datos: PreguntaRequest):
         etiqueta = "camas" if es_camas else (servicio or "sedes de IPS")
         texto = contar_respuesta(total, ciudad, etiqueta, es_camas)
         return StreamingResponse(
-            iter([_cierre(texto)]),
+            iter([texto]),
             media_type="text/plain; charset=utf-8",
         )
 
