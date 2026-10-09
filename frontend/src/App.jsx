@@ -111,7 +111,9 @@ function App() {
     setPregunta('')
     setError('')
 
-    const historial = mensajes.map((m) => ({ rol: m.rol, texto: m.texto }))
+    const historial = mensajes
+      .filter((m) => m.texto && m.texto.trim() !== '')
+      .map((m) => ({ rol: m.rol, texto: m.texto }))
     const indiceAsistente = mensajes.length + 1
 
     setMensajes((actuales) => [

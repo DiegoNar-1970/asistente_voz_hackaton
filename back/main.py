@@ -569,7 +569,8 @@ def _consultar_conteo(lugar: dict, servicio: str | None) -> tuple[int, str, bool
 
 # ---------------------------------------------------------------- prompts
 
-def prompt_redaccion(pregunta, historial, filas, ciudad, servicio) -> str:
+def prompt_redaccion(pregunta, historial, filas, ciudad, servicio, recordada=False) -> str:
+    origen = " (la indicaste antes en la conversación)" if recordada else ""
     return f"""
 Eres la asistente virtual de salud de una IPS en Colombia. Hablas en español,
 cercana y humana, como si ayudaras a una persona por voz.
@@ -581,12 +582,19 @@ REGLAS ESTRICTAS:
 - Si el dato no está en los RESULTADOS, dilo con naturalidad.
 - Entre 2 y 4 frases. Sin markdown, sin asteriscos, sin viñetas, sin emojis.
 - Responde SIEMPRE en español.
+- IMPORTANTE: NO vuelvas a saludar. No empieces con "Hola", "Buenos días",
+  "Claro que sí" ni frases de cortesía vacías. Ya hubo un saludo al inicio.
+  Ve directo al contenido de la respuesta.
+- Termina con una frase de cortesía natural como "¿Hay algo más en que te
+  pueda ayudar?".
+- Si la ciudad fue recordada de una conversación anterior, puedes mencionarlo
+  con naturalidad (por ejemplo "recuerdo que estás en Medellín").
 
 CONVERSACIÓN PREVIA:
 {historial or "(sin turnos previos)"}
 
 PREGUNTA DEL USUARIO: {pregunta}
-CIUDAD: {ciudad}
+CIUDAD: {ciudad}{origen}
 SERVICIO BUSCADO: {servicio or "no especificado"}
 
 RESULTADOS ({len(filas)} filas):
@@ -594,7 +602,13 @@ RESULTADOS ({len(filas)} filas):
 """
 
 
-def prompt_plan(pregunta: str, historial: str) -> str:
+def prompt_plan(pregunta: str, historial: str, memoria: str = "") -> str:
+    contexto = (
+        f"CIUDAD QUE EL USUARIO YA INDICÓ (la recuerdas, no vuelvas a pedirla): "
+        f"{memoria}\n"
+        if memoria
+        else ""
+    )
     return f"""
 Eres la asistente de salud de una IPS en Colombia. Usas EXCLUSIVAMENTE la
 Relación de IPS de datos.gov.co. {ESQUEMA}{SOQL_AYUDA}
@@ -602,7 +616,14 @@ Relación de IPS de datos.gov.co. {ESQUEMA}{SOQL_AYUDA}
 CONVERSACIÓN PREVIA:
 {historial or "(sin turnos previos)"}
 
+{contexto}
 PREGUNTA ACTUAL: {pregunta}
+
+REGLAS DE RESPUESTA (para las acciones pedir_datos y fuera_de_alcance):
+- NO saludes ni empieces con "Hola" ni "Buenos días": el saludo ya ocurrió.
+- Sé breve: 1 o 2 frases.
+- Cierra con una cortesía como "¿Hay algo más en que te pueda ayudar?".
+- Si ya conoces la ciudad, no vuelvas a preguntarla.
 
 Devuelve SOLO JSON válido con UNA de estas acciones:
 - {{"accion":"consultar","params":{{"$select":"...","$where":"...","$limit":"{LIMITE_RESPUESTA}"}}}}
@@ -665,6 +686,52 @@ def _historial_texto(historial: list[dict]) -> str:
     )
 
 
+def _detectar_lugar_ultimo(texto: str) -> dict | None:
+    """Devuelve el último lugar mencionado en el texto (la ciudad más reciente
+    gana, por si el usuario se corrige: 'no, soy de Bogotá')."""
+    if not LUGARES:
+        return None
+    texto = f" {texto} "
+    mejor = None
+    for alias, info in LUGARES.items():
+        posicion = texto.find(f" {alias} ")
+        if posicion >= 0 and (mejor is None or posicion > mejor[0]):
+            mejor = (posicion, info)
+    return mejor[1] if mejor else None
+
+
+def extraer_memoria(historial: list[dict]) -> dict:
+    """Recuerda la ciudad y el servicio que el usuario ya mencionó."""
+    memoria = {"lugar": None, "servicio": None, "servicios": []}
+
+    for mensaje in historial:
+        if mensaje.get("rol") != "usuario":
+            continue
+        texto = normalizar(mensaje.get("texto") or "")
+        if not texto:
+            continue
+
+        lugar = _detectar_lugar_ultimo(texto)
+        if lugar:
+            memoria["lugar"] = lugar
+
+        servicio = detectar_servicio(texto)
+        if servicio:
+            memoria["servicio"] = servicio
+            if servicio not in memoria["servicios"]:
+                memoria["servicios"].append(servicio)
+
+    return memoria
+
+
+def _cierre(texto: str) -> str:
+    """Añade la cortesía de cierre que mejora la atención al cliente."""
+    texto = texto.strip()
+    if re.search(r"ay algo m[áa]s|en que te pueda ayudar|en qu[ée] m[áa]s", texto, re.I):
+        return texto
+    return f"{texto} ¿Hay algo más en que te pueda ayudar?"
+
+
 def _datos_lugar(lugar: dict, servicio: str | None) -> tuple[list, str]:
     campo = lugar["campo"]
     valor = lugar["valor"]
@@ -697,6 +764,9 @@ def chat(datos: PreguntaRequest):
     historial_texto = _historial_texto(historial)
     entrada = normalizar(pregunta)
 
+    # Memoria: qué ciudad y qué servicio mencionó antes el usuario.
+    memoria = extraer_memoria(historial)
+
     # 1) Respuestas inmediatas sin red ni Gemini (saludos, gracias...).
     rapida = respuesta_rapida(entrada)
     if rapida:
@@ -706,11 +776,23 @@ def chat(datos: PreguntaRequest):
         )
 
     lugar = detectar_lugar(entrada)
+    recordada = False
+    if lugar is None and memoria["lugar"]:
+        # El usuario no repitió la ciudad: la tomamos de la memoria.
+        lugar = memoria["lugar"]
+        recordada = True
+
     servicio = detectar_servicio(entrada)
+    if servicio is None and memoria["servicio"] and recordada:
+        # Seguimiento ("¿cuántas camas hay?") sin repetir el servicio.
+        servicio = memoria["servicio"]
+
     pide_conteo = bool(re.search(r"\bcu[ánta]nt[oa]s?\b|\btotal\b", entrada))
 
     # 2) Camino directo: ya sabemos la ciudad, consultamos y redactamos.
     if lugar:
+        ciudad = lugar["valor"].title()
+
         # Conteos: una sola consulta agregada y respuesta inmediata.
         if pide_conteo:
             try:
@@ -720,9 +802,9 @@ def chat(datos: PreguntaRequest):
                     iter([error.detail]),
                     media_type="text/plain; charset=utf-8",
                 )
-            texto = contar_respuesta(total, lugar["valor"].title(), etiqueta, es_camas)
+            texto = contar_respuesta(total, ciudad, etiqueta, es_camas)
             return StreamingResponse(
-                iter([texto]),
+                iter([_cierre(texto)]),
                 media_type="text/plain; charset=utf-8",
             )
 
@@ -735,23 +817,22 @@ def chat(datos: PreguntaRequest):
             )
 
         if not filas:
-            ciudad = lugar["valor"].title()
             texto = (
                 f"No encontré información de {servicio or 'IPS'} en {ciudad} "
                 "con lo que tengo disponible. Prueba con otra ciudad o con "
                 "otro servicio."
             )
             return StreamingResponse(
-                iter([texto]),
+                iter([_cierre(texto)]),
                 media_type="text/plain; charset=utf-8",
             )
 
         prompt = prompt_redaccion(
-            pregunta, historial_texto, filas, lugar["valor"].title(), servicio
+            pregunta, historial_texto, filas, ciudad, servicio, recordada
         )
-        respaldo = texto_con_servicios(
-            filas, lugar["valor"].title(), servicio or "atención médica"
-        )
+        respaldo = _cierre(texto_con_servicios(
+            filas, ciudad, servicio or "atención médica"
+        ))
         return StreamingResponse(
             (limpiar_markdown(t, trim=False) for t in stream_con_recurso(prompt, respaldo)),
             media_type="text/plain; charset=utf-8",
@@ -759,7 +840,11 @@ def chat(datos: PreguntaRequest):
 
     # 3) Sin ciudad conocida: una sola llamada a Gemini para decidir.
     plan_texto = gemini_o_respaldo(
-        prompt_plan(pregunta, historial_texto),
+        prompt_plan(
+            pregunta,
+            historial_texto,
+            memoria["lugar"]["valor"].title() if memoria["lugar"] else "",
+        ),
         '{"accion":"pedir_datos","respuesta":'
         '"Cuéntame en qué ciudad estás y qué necesitas de salud."}',
     )
@@ -776,7 +861,7 @@ def chat(datos: PreguntaRequest):
     if accion == "fuera_de_alcance":
         texto = plan.get("respuesta") or texto_fuera_de_alcance()
         return StreamingResponse(
-            iter([limpiar_markdown(texto)]),
+            iter([limpiar_markdown(_cierre(texto))]),
             media_type="text/plain; charset=utf-8",
         )
 
@@ -785,7 +870,7 @@ def chat(datos: PreguntaRequest):
             "Cuéntame en qué ciudad estás y qué necesitas de salud para ayudarte."
         )
         return StreamingResponse(
-            iter([limpiar_markdown(texto)]),
+            iter([limpiar_markdown(_cierre(texto))]),
             media_type="text/plain; charset=utf-8",
         )
 
@@ -802,7 +887,7 @@ def chat(datos: PreguntaRequest):
 
     if not filas:
         return StreamingResponse(
-            iter([texto_sin_datos()]),
+            iter([_cierre(texto_sin_datos())]),
             media_type="text/plain; charset=utf-8",
         )
 
@@ -829,13 +914,13 @@ def chat(datos: PreguntaRequest):
         etiqueta = "camas" if es_camas else (servicio or "sedes de IPS")
         texto = contar_respuesta(total, ciudad, etiqueta, es_camas)
         return StreamingResponse(
-            iter([texto]),
+            iter([_cierre(texto)]),
             media_type="text/plain; charset=utf-8",
         )
 
     texto = texto_con_servicios(filas, ciudad, servicio or "atención médica")
     return StreamingResponse(
-        iter([texto]),
+        iter([_cierre(texto)]),
         media_type="text/plain; charset=utf-8",
     )
 
