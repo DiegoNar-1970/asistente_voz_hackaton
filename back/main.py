@@ -34,7 +34,7 @@ APP_TOKEN = os.getenv("SOCRATA_APP_TOKEN")
 
 # El límite de filas que usamos en cualquier consulta.
 MAX_FILAS = 1000
-LIMITE_RESPUESTA = 6
+LIMITE_RESPUESTA = 30
 
 app = FastAPI(title="Agente Vocal Cognitivo - IPS Colombia")
 
@@ -834,9 +834,13 @@ REGLAS ESTRICTAS:
 - Si te preguntan qué hacer, orienta con lo que sí sabes (dónde ir, qué
   llevar, a quién llamar). No respondas con un "no tengo información" seco.
   Para una urgencia vital, siempre: llama al 123 o ve a urgencias.
-- Entre 2 y 4 frases en total y máximo 60 palabras. Da como mucho 2 o 3
-  sedes de ejemplo: es mejor una respuesta corta que una larga. Sin markdown,
-  sin asteriscos, sin viñetas, sin emojis.
+- Entre 2 y 4 frases en total y máximo 60 palabras. Por defecto da como mucho
+  2 o 3 sedes de ejemplo: es mejor una respuesta corta que una larga. Si el
+  usuario pide más, otros, otras o "la lista completa", amplía a varias sedes
+  (hasta 8) y da SIEMPRE sedes distintas a las que ya aparecen en la
+  conversación: nunca repitas una dirección que ya mencionaste. Con más sedes
+  puedes llegar a 100 palabras. Sin markdown, sin asteriscos, sin viñetas,
+  sin emojis.
 - Responde SIEMPRE en español.
 - IMPORTANTE: NO vuelvas a saludar. No empieces con "Hola", "Buenos días",
   "Claro que sí" ni frases de cortesía vacías. Ya hubo un saludo al inicio.
@@ -1040,7 +1044,9 @@ def brief():
     return BRIEF_CACHE["data"]
 
 
-def _consultar_varias_ciudades(lugares: list[dict], servicio: str | None) -> str:
+def _consultar_varias_ciudades(
+    lugares: list[dict], servicio: str | None, invertir: bool = False
+) -> str:
     """Una consulta por ciudad contra la API, filtrando en el servidor con
     SoQL (no depende de los primeros 1000 registros). Devuelve un bloque de
     resultados agrupados por ciudad para el prompt."""
@@ -1048,7 +1054,7 @@ def _consultar_varias_ciudades(lugares: list[dict], servicio: str | None) -> str
     for sitio in lugares:
         ciudad = str(sitio.get("valor", "")).title()
         try:
-            filas, _ = _datos_lugar(sitio, servicio)
+            filas, _ = _datos_lugar(sitio, servicio, invertir=invertir)
         except HTTPException:
             filas = []
 
@@ -1185,7 +1191,12 @@ def _cierre(texto: str) -> str:
     return f"{texto}{random.choice(CIERRES)}"
 
 
-def _datos_lugar(lugar: dict, servicio: str | None) -> tuple[list, str]:
+def _datos_lugar(
+    lugar: dict, servicio: str | None, invertir: bool = False
+) -> tuple[list, str]:
+    """Consulta a la API filtrando en el servidor (SoQL), no sobre un bloque
+    local de registros. `invertir` trae otras sedes cuando el usuario pide
+    'más' y ya se le dieron las primeras."""
     campo = lugar["campo"]
     valor = lugar["valor"]
 
@@ -1199,11 +1210,13 @@ def _datos_lugar(lugar: dict, servicio: str | None) -> tuple[list, str]:
             "nom_grupo_capacidad, nom_descripcion_capacidad, municipio"
         )
 
-    filas = consultar_dataset({
+    params = {
         "$select": select,
         "$where": where,
         "$limit": str(LIMITE_RESPUESTA),
-    })
+        "$order": "nom_sede_ips desc" if invertir else "nom_sede_ips asc",
+    }
+    filas = consultar_dataset(params)
     return filas, where
 
 
@@ -1278,10 +1291,23 @@ def chat(datos: PreguntaRequest):
             media_type="text/plain; charset=utf-8",
         )
 
+    # El usuario quiere ver otras sedes distintas a las ya dadas.
+    pide_mas = bool(
+        re.search(
+            r"\botros?\b|\botras?\b|\bel resto\b|\bla lista completa\b|"
+            r"\bdame m[áa]s\b|\bd[áa]me otros\b|\btodos los\b|"
+            r"\bm[áa]s hospitales|\bm[áa]s sedes|\bm[áa]s direcciones|"
+            r"\bm[áa]s opciones|\bm[áa]s informaci|\bm[áa]s datos\b|"
+            r"\bqu[ée] m[áa]s\b|\bhay m[áa]s\b|\bmu[ée]strame m[áa]s\b|"
+            r"\bsiguient|\botra pregunta|otras preguntas",
+            entrada,
+        )
+    )
+
     # 4) Varias ciudades en la misma pregunta: una consulta a la API por ciudad
     #    (filtra en el servidor, no depende de los primeros 1000 registros).
     if len(mencionados) > 1:
-        pasos = _consultar_varias_ciudades(mencionados, servicio)
+        pasos = _consultar_varias_ciudades(mencionados, servicio, pide_mas)
         prompt = prompt_redaccion(
             pregunta,
             historial_texto,
@@ -1333,7 +1359,7 @@ def chat(datos: PreguntaRequest):
             )
 
         try:
-            filas, where = _datos_lugar(lugar, servicio)
+            filas, where = _datos_lugar(lugar, servicio, invertir=pide_mas)
         except HTTPException as error:
             return StreamingResponse(
                 iter([error.detail]),
