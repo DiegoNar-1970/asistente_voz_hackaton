@@ -7,20 +7,6 @@ const SALUDO_POR_DEFECTO =
   'Hola, ¿cómo estás? Soy la asistente virtual de la IPS. ' +
   'Dime en qué te puedo ayudar y en qué ciudad estás.'
 
-const EMOJI = {
-  alegria: '😄',
-  satisfaccion: '😊',
-  serenidad: '😌',
-  curiosidad: '🤔',
-  confusion: '😕',
-  preocupacion: '😟',
-  ansiedad: '😰',
-  frustracion: '😤',
-  enojo: '😠',
-  tristeza: '😢',
-  neutral: '🙂',
-}
-
 function hora() {
   return new Date().toLocaleTimeString('es-CO', {
     hour: '2-digit',
@@ -44,7 +30,9 @@ async function leerJson(response) {
 }
 
 function App() {
-  const recognitionRef = useRef(null)
+  const reconocimientoRef = useRef(null)
+  const transcripcionRef = useRef('')
+  const enviarAlSoltarRef = useRef(false)
 
   const [brief, setBrief] = useState(null)
   const [cargandoBrief, setCargandoBrief] = useState(true)
@@ -57,7 +45,6 @@ function App() {
   const [cargandoRespuesta, setCargandoRespuesta] = useState(false)
   const [escuchando, setEscuchando] = useState(false)
   const [error, setError] = useState('')
-  const [analisis, setAnalisis] = useState([])
   const [vozActiva, setVozActiva] = useState(true)
 
   const cargarInicial = useCallback(async () => {
@@ -76,7 +63,7 @@ function App() {
     } catch (err) {
       setError(
         err.message ||
-          'No se pudo conectar con la fuente de datos. Comprueba el backend.',
+          'No se pudo conectar con la asistente. Comprueba el backend.',
       )
     } finally {
       setCargandoBrief(false)
@@ -99,19 +86,6 @@ function App() {
     window.speechSynthesis.speak(voz)
   }
 
-  async function clasificarEmocion(texto) {
-    try {
-      const response = await fetch(`${API_URL}/api/emotion`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ texto, rol: 'usuario' }),
-      })
-      return await leerJson(response)
-    } catch {
-      return null
-    }
-  }
-
   function iniciarAsistente() {
     setInicio(true)
     setMensajes([{ rol: 'asistente', texto: saludo, hora: hora() }])
@@ -121,39 +95,18 @@ function App() {
   async function enviarPregunta(texto = pregunta) {
     const textoPregunta = texto.trim()
 
-    if (!textoPregunta || cargandoRespuesta || !inicio) return
+    if (!textoPregunta || cargandoRespuesta) return
 
     setPregunta('')
     setError('')
 
     const historial = mensajes.map((m) => ({ rol: m.rol, texto: m.texto }))
-    const marcaHora = hora()
 
     setMensajes((actuales) => [
       ...actuales,
-      { rol: 'usuario', texto: textoPregunta, hora: marcaHora },
+      { rol: 'usuario', texto: textoPregunta, hora: hora() },
     ])
     setCargandoRespuesta(true)
-
-    clasificarEmocion(textoPregunta).then((analisisUsuario) => {
-      if (!analisisUsuario) return
-      setMensajes((actuales) =>
-        actuales.map((m) =>
-          m.hora === marcaHora && m.rol === 'usuario'
-            ? { ...m, emocion: analisisUsuario }
-            : m,
-        ),
-      )
-      setAnalisis((actuales) => [
-        ...actuales,
-        {
-          ...analisisUsuario,
-          rol: 'usuario',
-          texto: textoPregunta,
-          hora: marcaHora,
-        },
-      ])
-    })
 
     try {
       const response = await fetch(`${API_URL}/api/chat`, {
@@ -166,13 +119,7 @@ function App() {
 
       setMensajes((actuales) => [
         ...actuales,
-        {
-          rol: 'asistente',
-          texto: data.respuesta,
-          hora: hora(),
-          consulta: data.consulta,
-          filas: data.filas,
-        },
+        { rol: 'asistente', texto: data.respuesta, hora: hora() },
       ])
 
       leerEnVozAlta(data.respuesta)
@@ -183,7 +130,16 @@ function App() {
     }
   }
 
-  function iniciarMicrofono() {
+  function usarSugerencia(texto) {
+    if (cargandoRespuesta) return
+    if (!inicio) {
+      setInicio(true)
+      setMensajes([{ rol: 'asistente', texto: saludo, hora: hora() }])
+    }
+    enviarPregunta(texto)
+  }
+
+  function iniciarDictado() {
     const SpeechRecognition =
       window.SpeechRecognition || window.webkitSpeechRecognition
 
@@ -194,16 +150,16 @@ function App() {
       return
     }
 
-    if (escuchando) {
-      recognitionRef.current?.stop()
-      return
-    }
+    if (cargandoRespuesta || !inicio || escuchando) return
 
     const reconocimiento = new SpeechRecognition()
     reconocimiento.lang = 'es-CO'
-    reconocimiento.continuous = false
+    reconocimiento.continuous = true
     reconocimiento.interimResults = true
     reconocimiento.maxAlternatives = 1
+
+    transcripcionRef.current = ''
+    enviarAlSoltarRef.current = false
 
     reconocimiento.onstart = () => {
       setEscuchando(true)
@@ -215,18 +171,30 @@ function App() {
       for (let i = 0; i < event.results.length; i++) {
         texto += event.results[i][0].transcript
       }
-      setPregunta(texto.trim())
+      transcripcionRef.current = texto.trim()
+      setPregunta(transcripcionRef.current)
     }
 
     reconocimiento.onerror = (event) => {
       if (event.error !== 'no-speech' && event.error !== 'aborted') {
-        setError(`Error de reconocimiento de voz: ${event.error}`)
+        setError(`Error de voz: ${event.error}`)
       }
     }
 
-    reconocimiento.onend = () => setEscuchando(false)
+    reconocimiento.onend = () => {
+      setEscuchando(false)
+      if (enviarAlSoltarRef.current) {
+        enviarAlSoltarRef.current = false
+        const texto = transcripcionRef.current.trim()
+        if (texto) {
+          enviarPregunta(texto)
+        } else {
+          setPregunta('')
+        }
+      }
+    }
 
-    recognitionRef.current = reconocimiento
+    reconocimientoRef.current = reconocimiento
 
     try {
       reconocimiento.start()
@@ -236,13 +204,11 @@ function App() {
     }
   }
 
-  const totalRegistros = brief?.total_registros?.[0]?.total
-  const emocionActual = analisis[analisis.length - 1] || null
-  const conteo = analisis.reduce((acc, item) => {
-    acc[item.sentimiento] = (acc[item.sentimiento] || 0) + 1
-    return acc
-  }, {})
-  const totalAnalisis = analisis.length || 1
+  function soltarDictado() {
+    if (!escuchando) return
+    enviarAlSoltarRef.current = true
+    reconocimientoRef.current?.stop()
+  }
 
   return (
     <main className="app-shell">
@@ -264,18 +230,17 @@ function App() {
           </button>
           <span className="status">
             <span className="status-dot" />
-            Datos.gov.co en vivo
+            En línea
           </span>
         </div>
       </header>
 
       <section className="hero">
-        <span className="eyebrow">ASISTENTE DE SALUD POR VOZ · DATOS ABIERTOS</span>
-        <h1>Habla con la red de IPS de Colombia.</h1>
+        <span className="eyebrow">ASISTENTE DE SALUD POR VOZ</span>
+        <h1>Tu asistente de salud, siempre disponible.</h1>
         <p>
-          Cuéntame tu necesidad de salud y tu ciudad. Con la «Relación de IPS»
-          de datos.gov.co te oriento sobre instituciones y capacidad instalada,
-          y analizo el tono de nuestra conversación en vivo.
+          Háblale con naturalidad, cuéntale qué necesitas y en qué ciudad
+          estás, y te ayudará a encontrar dónde atenderte.
         </p>
       </section>
 
@@ -284,44 +249,38 @@ function App() {
           <div className="section-heading">
             <span className="step-number">01</span>
             <div>
-              <h2>Fuente de datos</h2>
-              <p>Índice abierto consultado en vivo.</p>
+              <h2>¿Cómo te ayudo?</h2>
+              <p>Habla conmigo como con una persona.</p>
             </div>
           </div>
 
           {cargandoBrief ? (
             <div className="empty-state compact">
               <span className="spinner" />
-              <strong>Conectando con datos.gov.co</strong>
+              <strong>Preparando la asistente</strong>
             </div>
           ) : (
             <>
-              {brief && (
-                <div className="document-info">
-                  <span className="success-label">✓ Fuente conectada</span>
-                  <p>{brief.fuente}</p>
-                  <span>
-                    {totalRegistros
-                      ? `${Number(totalRegistros).toLocaleString('es-CO')} registros`
-                      : 'Datos abiertos'}{' '}
-                    · Ministerio de Salud
-                  </span>
-                </div>
-              )}
+              <div className="summary-card brief-card">
+                <p className="summary-text">
+                  {brief?.introduccion ||
+                    'Soy tu asistente de salud. Cuéntame qué necesitas y en qué ciudad estás para ayudarte a encontrar dónde atenderte.'}
+                </p>
+              </div>
 
-              {brief?.introduccion && (
-                <div className="summary-card brief-card">
-                  <p className="summary-text">{brief.introduccion}</p>
-                </div>
-              )}
+              <ul className="help-list">
+                <li>Encontrar clínicas y hospitales en tu ciudad.</li>
+                <li>Buscar urgencias, camas, partos o consulta externa.</li>
+                <li>Conocerte los datos de contacto de cada lugar.</li>
+              </ul>
             </>
           )}
 
           <div className="privacy-note">
             <span>ⓘ</span>
             <p>
-              Cada consulta lee máximo 1.000 filas de datos.gov.co. No se
-              almacena información personal.
+              Te oriento con información oficial de salud. No reemplaza una
+              valoración médica.
             </p>
           </div>
         </aside>
@@ -332,7 +291,7 @@ function App() {
               <span className="step-number">02</span>
               <div>
                 <h2>Conversa con la asistente</h2>
-                <p>Responde por voz o por texto.</p>
+                <p>Mantén pulsado el micrófono, habla y suéltalo al terminar.</p>
               </div>
             </div>
 
@@ -342,8 +301,8 @@ function App() {
                   <span className="chat-sparkle">✳</span>
                   <strong>Asistente virtual de la IPS</strong>
                   <p>
-                    Pulsa para que la asistente te salude por voz y te pregunte
-                    en qué te puede ayudar.
+                    Pulsa para que te salude por voz y te pregunte en qué te
+                    puede ayudar.
                   </p>
                   <button
                     type="button"
@@ -365,12 +324,6 @@ function App() {
                     <span className="message-label">
                       {mensaje.rol === 'usuario' ? 'Tú' : 'Asistente'}
                       <span className="message-time">{mensaje.hora}</span>
-                      {mensaje.emocion && (
-                        <span className="msg-emotion">
-                          {EMOJI[mensaje.emocion.emocion] || '🙂'}{' '}
-                          {mensaje.emocion.emocion}
-                        </span>
-                      )}
                     </span>
                     <p>{mensaje.texto}</p>
 
@@ -383,22 +336,13 @@ function App() {
                         🔈 Escuchar respuesta
                       </button>
                     )}
-
-                    {mensaje.consulta && (
-                      <span className="query-chip">
-                        Consulta: {JSON.stringify(mensaje.consulta)} ·{' '}
-                        {mensaje.filas} filas
-                      </span>
-                    )}
                   </div>
                 ))}
 
               {cargandoRespuesta && (
                 <div className="message asistente">
                   <span className="message-label">Asistente</span>
-                  <p className="thinking">
-                    Consultando datos y analizando la conversación…
-                  </p>
+                  <p className="thinking">Buscando la mejor opción…</p>
                 </div>
               )}
             </div>
@@ -409,7 +353,7 @@ function App() {
                   <button
                     key={item}
                     className="suggestion-button"
-                    onClick={() => enviarPregunta(item)}
+                    onClick={() => usarSugerencia(item)}
                   >
                     <span>{item}</span>
                     <span className="suggestion-arrow">↗</span>
@@ -428,9 +372,16 @@ function App() {
               <button
                 className={`mic-button ${escuchando ? 'mic-active' : ''}`}
                 type="button"
-                onClick={iniciarMicrofono}
+                onPointerDown={(event) => {
+                  event.preventDefault()
+                  iniciarDictado()
+                }}
+                onPointerUp={soltarDictado}
+                onPointerLeave={soltarDictado}
+                onPointerCancel={soltarDictado}
                 disabled={cargandoRespuesta || !inicio}
-                aria-label="Dictar mensaje"
+                aria-label="Mantén pulsado para hablar"
+                title="Mantén pulsado para hablar"
               >
                 🎙
               </button>
@@ -442,8 +393,8 @@ function App() {
                   !inicio
                     ? 'Inicia la asistente para hablar'
                     : escuchando
-                      ? 'Escuchando…'
-                      : 'Escribe o dicta tu necesidad y ciudad…'
+                      ? 'Escuchando… habla y suelta el botón'
+                      : 'Mantén pulsado el micrófono y habla…'
                 }
                 disabled={cargandoRespuesta || !inicio}
                 aria-label="Tu mensaje"
@@ -459,7 +410,7 @@ function App() {
             </form>
 
             <p className="chat-footnote">
-              La asistente orienta con datos abiertos y no reemplaza una
+              La asistente orienta con información de salud y no reemplaza una
               valoración médica.
             </p>
           </section>
@@ -468,113 +419,26 @@ function App() {
             <div className="section-heading">
               <span className="step-number">03</span>
               <div>
-                <h2>Sentimiento y emociones en vivo</h2>
-                <p>Análisis del tono de cada turno mientras la conversación ocurre.</p>
+                <h2>Preguntas frecuentes</h2>
+                <p>Toca una para preguntármela.</p>
               </div>
             </div>
 
-            <div className="emotion-panel">
-              <div className="emotion-current">
-                <span className="emotion-emoji">
-                  {emocionActual
-                    ? EMOJI[emocionActual.emocion] || '🙂'
-                    : '💬'}
-                </span>
-                <div className="emotion-headline">
-                  <strong>
-                    {emocionActual ? emocionActual.emocion : 'sin analizar'}
-                  </strong>
-                  <span className={`emotion-tag ${emocionActual?.sentimiento || 'neutral'}`}>
-                    {emocionActual?.sentimiento || 'neutral'}
-                  </span>
-                </div>
-                <span className="emotion-intensity">
-                  Intensidad {Math.round((emocionActual?.intensidad || 0) * 100)}%
-                </span>
-              </div>
-
-              <span className="emotion-bar">
-                <i
-                  style={{
-                    width: `${Math.round((emocionActual?.intensidad || 0) * 100)}%`,
-                  }}
-                />
-              </span>
-
-              {emocionActual?.explicacion && (
-                <p className="emotion-explication">{emocionActual.explicacion}</p>
-              )}
-
-              {analisis.length > 0 && (
-                <div className="emotion-dist">
-                  {['positivo', 'neutral', 'negativo'].map((clave) => (
-                    <span
-                      key={clave}
-                      className={`emotion-seg ${clave}`}
-                      style={{
-                        width: `${((conteo[clave] || 0) / totalAnalisis) * 100}%`,
-                      }}
-                    />
-                  ))}
-                </div>
-              )}
-
-              {analisis.length > 0 && (
-                <div className="emotion-legend">
-                  {['positivo', 'neutral', 'negativo'].map((clave) => (
-                    <span key={clave}>
-                      <i className={`emotion-dot ${clave}`} /> {clave}:{' '}
-                      {conteo[clave] || 0}
-                    </span>
-                  ))}
-                </div>
+            <div className="suggestion-list">
+              {(preguntas.length > 0 ? preguntas : sugerencias).map(
+                (item, index) => (
+                  <button
+                    key={`${index}-${item}`}
+                    className="suggestion-button"
+                    onClick={() => usarSugerencia(item)}
+                    disabled={cargandoRespuesta}
+                  >
+                    <span>{item}</span>
+                    <span className="suggestion-arrow">↗</span>
+                  </button>
+                ),
               )}
             </div>
-
-            <div className="analysis-timeline">
-              {analisis.length === 0 ? (
-                <p className="transcript-empty">
-                  El análisis emocional aparecerá aquí con cada mensaje.
-                </p>
-              ) : (
-                analisis.map((item, index) => (
-                  <div className="analysis-item" key={`a-${index}`}>
-                    <span className="analysis-emoji">
-                      {EMOJI[item.emocion] || '🙂'}
-                    </span>
-                    <div className="analysis-body">
-                      <div className="analysis-meta">
-                        <span className={`emotion-tag ${item.sentimiento}`}>
-                          {item.emocion}
-                        </span>
-                        <span className="transcript-time">{item.hora}</span>
-                      </div>
-                      <p>{item.texto}</p>
-                    </div>
-                  </div>
-                ))
-              )}
-            </div>
-
-            {preguntas.length > 0 && (
-              <div className="suggestions">
-                <h3>Preguntas para explorar</h3>
-                <p>Selecciona una si quieres una idea.</p>
-                <div className="suggestion-list">
-                  {preguntas.map((item, index) => (
-                    <button
-                      key={`${index}-${item}`}
-                      className="suggestion-button"
-                      onClick={() => enviarPregunta(item)}
-                      disabled={cargandoRespuesta || !inicio}
-                    >
-                      <span>{item}</span>
-                      <span className="suggestion-arrow">↗</span>
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
           </section>
         </div>
       </section>
@@ -590,7 +454,7 @@ function App() {
 
       <footer className="footer">
         <span>Vocal Cognitivo · Kognia Labs</span>
-        <span>Asistente de voz sobre datos abiertos de salud</span>
+        <span>Asistente de salud por voz</span>
       </footer>
     </main>
   )

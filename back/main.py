@@ -111,6 +111,15 @@ def limpiar_json(texto: str) -> str:
     ).strip()
 
 
+def limpiar_markdown(texto: str) -> str:
+    """Deja texto natural para mostrar y leer en voz alta (sin markdown)."""
+    texto = texto.replace("**", "").replace("__", "").replace("`", "")
+    texto = re.sub(r"^\s*[*•\-]\s+", "", texto, flags=re.MULTILINE)
+    texto = re.sub(r"^#{1,6}\s*", "", texto, flags=re.MULTILINE)
+    texto = texto.replace("*", "").replace("#", "")
+    return re.sub(r"\n{3,}", "\n\n", texto).strip()
+
+
 def consultar_gemini(prompt: str) -> str:
     try:
         respuesta = cliente.models.generate_content(
@@ -187,9 +196,9 @@ def greeting():
             "Dime en qué te puedo ayudar y en qué ciudad estás."
         ),
         "sugerencias": [
-            "Estoy en Medellín y necesito saber dónde hay urgencias.",
-            "¿Qué IPS con camas hay en Bogotá?",
-            "Busco consulta externa en Cali.",
+            "¿Cuál es la clínica más cercana donde estoy?",
+            "Estoy en Medellín y necesito urgencias.",
+            "¿Dónde puedo encontrar atención de partos en Bogotá?",
         ],
     }
 
@@ -228,18 +237,20 @@ def brief():
     }
 
     prompt = f"""
-Eres el presentador de un agente de voz sobre datos de salud de Colombia.
-A partir de los agregados reales del conjunto de datos, escribe:
-- "introduccion": 2 o 3 frases en español explicando de qué trata la fuente.
-- "preguntas_sugeridas": entre 4 y 5 preguntas variadas y útiles que se puedan
-  responder con estos datos (agregados, comparaciones, detalle de una IPS).
-
-No inventes cifras: usa solo los números de los agregados.
+Eres la asistente virtual de una red de salud en Colombia. Escribe contenido
+cercano y útil para una persona que busca atención médica, sin tecnicismos y sin
+mencionar "datos", "registros", "API", "filas" ni cifras técnicas.
+- "introduccion": 2 frases que expliquen para qué sirve esta asistente
+  (ayudarlo a encontrar dónde atenderte según su ciudad y su necesidad).
+- "preguntas_sugeridas": entre 4 y 5 preguntas que haría un paciente y que
+  orienten a encontrar ayuda. Ejemplos: "¿Cuál es la clínica más cercana según
+  mi ciudad?", "¿Dónde hay urgencias en Medellín?", "¿Dónde puedo tener un parto
+  en Bogotá?".
 
 Devuelve únicamente JSON válido:
 {{"introduccion": "...", "preguntas_sugeridas": ["...", "..."]}}
 
-AGREGADOS:
+AGREGADOS (referencia interna, no los menciones):
 {json.dumps(datos, ensure_ascii=False)}
 """
 
@@ -317,12 +328,12 @@ Decide una acción y devuelve SOLO JSON válido:
 
     if accion != "consultar" or not plan.get("params"):
         respuesta = plan.get("respuesta") or (
-            "Solo puedo ayudarte con información de las IPS de Colombia y su "
-            "capacidad instalada."
+            "Cuéntame en qué ciudad estás y qué necesitas de salud para poder "
+            "ayudarte."
         )
         return {
             "pregunta": pregunta,
-            "respuesta": respuesta,
+            "respuesta": limpiar_markdown(respuesta),
             "accion": accion or "pedir_datos",
             "consulta": None,
             "filas": 0,
@@ -330,26 +341,29 @@ Decide una acción y devuelve SOLO JSON válido:
         }
 
     params = dict(plan["params"])
-    params.setdefault("$limit", "20")
+    params.setdefault("$limit", "10")
     filas = consultar_dataset(params)
 
     prompt_respuesta = f"""
 Eres la asistente virtual de una red de IPS en Colombia. Hablas en español,
-cercana y clara. Ayudas a la persona con su necesidad de salud usando
-EXCLUSIVAMENTE los datos de la consulta. No das diagnósticos médicos: orientas
-sobre instituciones y su capacidad instalada.
-- Responde en 2 a 4 frases. Si listas opciones, usa viñetas cortas.
-- Si vienen 0 filas, dilo con naturalidad y propón ampliar la búsqueda.
+cercana y humana, como si estuvieras ayudando a una persona por voz.
+Ayúdala con su necesidad de salud usando EXCLUSIVAMENTE los datos de la consulta.
+No das diagnósticos médicos: orientas sobre instituciones y su capacidad.
+IMPORTANTE: no uses markdown ni símbolos (nada de asteriscos, almohadillas,
+barras, viñetas con símbolos). Escribe frases naturales.
+- Responde en 2 a 4 frases.
+- Si mencionas opciones, sepáralas con comas o punto y coma, no con viñetas.
+- Si no hay resultados, dilo con naturalidad y propón ampliar la búsqueda.
 
 CONVERSACIÓN PREVIA:
 {historial_texto or "(sin turnos previos)"}
 
 PREGUNTA DEL USUARIO: {pregunta}
 RESULTADOS ({len(filas)} filas):
-{json.dumps(filas[:30], ensure_ascii=False)}
+{json.dumps(filas[:20], ensure_ascii=False)}
 """
 
-    respuesta = consultar_gemini(prompt_respuesta)
+    respuesta = limpiar_markdown(consultar_gemini(prompt_respuesta))
 
     return {
         "pregunta": pregunta,

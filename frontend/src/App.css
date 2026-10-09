@@ -1108,3 +1108,29 @@
   margin-bottom: 14px;
 }
 
+.help-list {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  margin: 18px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.help-list li {
+  position: relative;
+  padding-left: 22px;
+  color: #555a6e;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.help-list li::before {
+  content: "✓";
+  position: absolute;
+  left: 0;
+  color: #6558df;
+  font-weight: 800;
+}
+
+
