@@ -536,6 +536,51 @@ PALABRAS_SALUDO = {
     "noches", "que", "mas", "como", "estas", "todo", "bien", "saludos",
 }
 
+# Emergencias: la respuesta correcta no es buscar en la base de datos.
+PATRON_EMERGENCIA = re.compile(
+    r"\b(morir\w*|muerte|muriendo|a punto de morir|paro|infarto|"
+    r"no respiro|no puedo respirar|le cuesta respirar|desmay\w*|"
+    r"sin conciencia|no despierta|hemorragia|sangrado|sangre a raudales|"
+    r"accidente|atropell\w*|choque|convuls\w*|sobredosis|intoxic\w*|"
+    r"quemadura grave|fractura abierta|emergencia|socorro|me estoy muriendo)\b",
+    re.I,
+)
+# Búsquedas de ubicación ("¿dónde hay urgencias?") no son una emergencia.
+NO_EMERGENCIA = re.compile(
+    r"\bd[oó]nde\b|\bcu[áa]nt[oa]s?\b|\bcu[áa]l(?:es)?\b|"
+    r"\bhay urgencias\b|\best[áa]\b|\bdirecci\w*\b",
+    re.I,
+)
+
+
+def _es_emergencia(texto: str) -> bool:
+    return bool(PATRON_EMERGENCIA.search(texto)) and not bool(
+        NO_EMERGENCIA.search(texto)
+    )
+
+
+def respuesta_emergencia(lugar: dict | None) -> str:
+    """Guion de seguridad: nada de buscar en la base, primero salvar la vida."""
+    base = (
+        "Si es una emergencia, llama de inmediato al 123 o ve al servicio de "
+        "urgencias más cercano. No esperes por mí."
+    )
+    if not lugar:
+        return f"{base} Dime en qué ciudad estás y te indico dónde hay urgencias."
+
+    try:
+        filas, _ = _datos_lugar(lugar, "hospitales")
+    except HTTPException:
+        filas = []
+
+    ciudad = lugar["valor"].title()
+    if not filas:
+        filas, _ = _datos_lugar(lugar, "urgencias")
+    if not filas:
+        return f"{base} En {ciudad} no localicé sedes con estos datos, así que usa el 123."
+
+    return f"{base} En {ciudad} puedes ir a {formato_ip(filas[0])}."
+
 
 PEDIR_CIUDAD = re.compile(
     r"\s*[,;]?\s*(y|e)?\s*(dime en qu[ée] ciudad est[áa]s[^.]*\.|"
@@ -743,7 +788,12 @@ REGLAS ESTRICTAS:
   direcciones, teléfonos ni cantidades.
 - No des diagnósticos ni medicamentos. Un consejo práctico (llamar antes de ir,
   verificar horarios, traer la cédula o la carnetización) sí está permitido.
-- Si el dato no está en los RESULTADOS, dilo con naturalidad.
+- Si el dato no está en los RESULTADOS, dilo con naturalidad. Nunca afirmes
+  que "no contamos con ese servicio" ni que "no está disponible": solo di que
+  no aparece en los datos disponibles.
+- Si te preguntan qué hacer, orienta con lo que sí sabes (dónde ir, qué
+  llevar, a quién llamar). No respondas con un "no tengo información" seco.
+  Para una urgencia vital, siempre: llama al 123 o ve a urgencias.
 - Entre 2 y 4 frases en total y máximo 60 palabras. Da como mucho 2 o 3
   sedes de ejemplo: es mejor una respuesta corta que una larga. Sin markdown,
   sin asteriscos, sin viñetas, sin emojis.
@@ -1102,6 +1152,13 @@ def chat(datos: PreguntaRequest):
         # El usuario no repitió la ciudad: la tomamos de la memoria.
         lugar = memoria["lugar"]
         recordada = True
+
+    # 3) Emergencia: primero salvar la vida, no consultar la base de datos.
+    if _es_emergencia(entrada):
+        return StreamingResponse(
+            iter([respuesta_emergencia(lugar)]),
+            media_type="text/plain; charset=utf-8",
+        )
 
     servicio = detectar_servicio(entrada)
     # Solo se hereda el servicio de un turno anterior si la nueva pregunta no
