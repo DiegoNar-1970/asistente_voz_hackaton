@@ -15,18 +15,15 @@ function hora() {
   })
 }
 
-async function leerJson(response) {
-  const data = await response.json().catch(() => ({}))
-
-  if (!response.ok) {
-    throw new Error(
-      typeof data.detail === 'string'
-        ? data.detail
-        : 'No se pudo completar la operación.',
-    )
-  }
-
-  return data
+function limpiarTexto(texto) {
+  return texto
+    .replace(/\*\*/g, '')
+    .replace(/__/g, '')
+    .replace(/`/g, '')
+    .replace(/^\s*[*•-]\s+/gm, '')
+    .replace(/^#{1,6}\s*/gm, '')
+    .replace(/[*#]/g, '')
+    .trim()
 }
 
 function App() {
@@ -35,7 +32,6 @@ function App() {
   const enviarAlSoltarRef = useRef(false)
 
   const [brief, setBrief] = useState(null)
-  const [cargandoBrief, setCargandoBrief] = useState(true)
   const [inicio, setInicio] = useState(false)
   const [saludo, setSaludo] = useState(SALUDO_POR_DEFECTO)
   const [sugerencias, setSugerencias] = useState([])
@@ -43,6 +39,7 @@ function App() {
   const [pregunta, setPregunta] = useState('')
   const [mensajes, setMensajes] = useState([])
   const [cargandoRespuesta, setCargandoRespuesta] = useState(false)
+  const [pensando, setPensando] = useState(false)
   const [escuchando, setEscuchando] = useState(false)
   const [error, setError] = useState('')
   const [vozActiva, setVozActiva] = useState(true)
@@ -53,32 +50,25 @@ function App() {
         fetch(`${API_URL}/api/brief`),
         fetch(`${API_URL}/api/greeting`),
       ])
-      const dBrief = await leerJson(rBrief)
-      const dSaludo = await leerJson(rSaludo)
+      const dBrief = await rBrief.json().catch(() => ({}))
+      const dSaludo = await rSaludo.json().catch(() => ({}))
 
       setBrief(dBrief)
       setPreguntas(dBrief.preguntas_sugeridas || [])
       setSaludo(dSaludo.mensaje || SALUDO_POR_DEFECTO)
       setSugerencias(dSaludo.sugerencias || [])
-    } catch (err) {
-      setError(
-        err.message ||
-          'No se pudo conectar con la asistente. Comprueba el backend.',
-      )
-    } finally {
-      setCargandoBrief(false)
+    } catch {
+      // La asistente arranca igualmente con los textos de reserva.
     }
   }, [])
 
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- carga inicial desde la API
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- la carga inicial vive en la API
     cargarInicial()
   }, [cargarInicial])
 
-  function leerEnVozAlta(texto) {
+  function decir(texto) {
     if (!('speechSynthesis' in window) || !vozActiva) return
-
-    window.speechSynthesis.cancel()
     const voz = new SpeechSynthesisUtterance(texto)
     voz.lang = 'es-CO'
     voz.rate = 1.05
@@ -86,10 +76,31 @@ function App() {
     window.speechSynthesis.speak(voz)
   }
 
+  function leerEnVozAlta(texto) {
+    if (!('speechSynthesis' in window) || !vozActiva) return
+    window.speechSynthesis.cancel()
+    decir(texto)
+  }
+
   function iniciarAsistente() {
     setInicio(true)
-    setMensajes([{ rol: 'asistente', texto: saludo, hora: hora() }])
+    setMensajes([{ rol: 'asistente', texto: limpiarTexto(saludo), hora: hora() }])
     leerEnVozAlta(saludo)
+  }
+
+  function hablarIncremental(texto, estado) {
+    if (!vozActiva) {
+      estado.hablado = texto.length
+      return
+    }
+    while (estado.hablado < texto.length) {
+      const resto = texto.slice(estado.hablado)
+      const corte = resto.match(/^[^.!?…\n]*[.!?…]+(\s+|$)/)
+      if (!corte) break
+      const trozo = corte[0].trim()
+      if (trozo) decir(trozo)
+      estado.hablado += corte[0].length
+    }
   }
 
   async function enviarPregunta(texto = pregunta) {
@@ -101,12 +112,16 @@ function App() {
     setError('')
 
     const historial = mensajes.map((m) => ({ rol: m.rol, texto: m.texto }))
+    const indiceAsistente = mensajes.length + 1
 
     setMensajes((actuales) => [
       ...actuales,
       { rol: 'usuario', texto: textoPregunta, hora: hora() },
+      { rol: 'asistente', texto: '', hora: hora() },
     ])
     setCargandoRespuesta(true)
+    setPensando(true)
+    if ('speechSynthesis' in window) window.speechSynthesis.cancel()
 
     try {
       const response = await fetch(`${API_URL}/api/chat`, {
@@ -115,17 +130,59 @@ function App() {
         body: JSON.stringify({ pregunta: textoPregunta, historial }),
       })
 
-      const data = await leerJson(response)
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}))
+        throw new Error(
+          typeof data.detail === 'string'
+            ? data.detail
+            : 'No se pudo obtener una respuesta.',
+        )
+      }
 
-      setMensajes((actuales) => [
-        ...actuales,
-        { rol: 'asistente', texto: data.respuesta, hora: hora() },
-      ])
+      const estado = { hablado: 0 }
+      let acumulado = ''
 
-      leerEnVozAlta(data.respuesta)
+      const actualizar = (textoActual) => {
+        setMensajes((actuales) => {
+          if (actuales.length <= indiceAsistente) return actuales
+          const copia = [...actuales]
+          copia[indiceAsistente] = {
+            ...copia[indiceAsistente],
+            texto: textoActual,
+          }
+          return copia
+        })
+      }
+
+      if (response.body && response.body.getReader) {
+        const reader = response.body.getReader()
+        const decoder = new TextDecoder()
+
+        for (;;) {
+          const { done, value } = await reader.read()
+          if (done) break
+          acumulado += decoder.decode(value, { stream: true })
+          const limpio = limpiarTexto(acumulado)
+          setPensando(false)
+          actualizar(limpio)
+          hablarIncremental(limpio, estado)
+        }
+      } else {
+        acumulado = await response.text()
+      }
+
+      const final = limpiarTexto(acumulado)
+      actualizar(final)
+      setPensando(false)
+
+      if (estado.hablado < final.length) {
+        const resto = final.slice(estado.hablado).trim()
+        if (resto && vozActiva) decir(resto)
+      }
     } catch (err) {
       setError(err.message || 'No se pudo obtener una respuesta.')
     } finally {
+      setPensando(false)
       setCargandoRespuesta(false)
     }
   }
@@ -134,7 +191,9 @@ function App() {
     if (cargandoRespuesta) return
     if (!inicio) {
       setInicio(true)
-      setMensajes([{ rol: 'asistente', texto: saludo, hora: hora() }])
+      setMensajes([
+        { rol: 'asistente', texto: limpiarTexto(saludo), hora: hora() },
+      ])
     }
     enviarPregunta(texto)
   }
@@ -254,27 +313,18 @@ function App() {
             </div>
           </div>
 
-          {cargandoBrief ? (
-            <div className="empty-state compact">
-              <span className="spinner" />
-              <strong>Preparando la asistente</strong>
-            </div>
-          ) : (
-            <>
-              <div className="summary-card brief-card">
-                <p className="summary-text">
-                  {brief?.introduccion ||
-                    'Soy tu asistente de salud. Cuéntame qué necesitas y en qué ciudad estás para ayudarte a encontrar dónde atenderte.'}
-                </p>
-              </div>
+          <div className="summary-card brief-card">
+            <p className="summary-text">
+              {brief?.introduccion ||
+                'Soy tu asistente de salud. Cuéntame qué necesitas y en qué ciudad estás para ayudarte a encontrar dónde atenderte.'}
+            </p>
+          </div>
 
-              <ul className="help-list">
-                <li>Encontrar clínicas y hospitales en tu ciudad.</li>
-                <li>Buscar urgencias, camas, partos o consulta externa.</li>
-                <li>Conocerte los datos de contacto de cada lugar.</li>
-              </ul>
-            </>
-          )}
+          <ul className="help-list">
+            <li>Encontrar clínicas y hospitales en tu ciudad.</li>
+            <li>Buscar urgencias, camas, partos o consulta externa.</li>
+            <li>Conocer los datos de contacto de cada lugar.</li>
+          </ul>
 
           <div className="privacy-note">
             <span>ⓘ</span>
@@ -308,7 +358,6 @@ function App() {
                     type="button"
                     className="primary-button start-button"
                     onClick={iniciarAsistente}
-                    disabled={cargandoBrief}
                   >
                     🔈 Iniciar asistente
                   </button>
@@ -316,33 +365,35 @@ function App() {
               )}
 
               {inicio &&
-                mensajes.map((mensaje, index) => (
-                  <div
-                    className={`message ${mensaje.rol}`}
-                    key={`${index}-${mensaje.hora}`}
-                  >
-                    <span className="message-label">
-                      {mensaje.rol === 'usuario' ? 'Tú' : 'Asistente'}
-                      <span className="message-time">{mensaje.hora}</span>
-                    </span>
-                    <p>{mensaje.texto}</p>
+                mensajes
+                  .filter((mensaje) => mensaje.texto !== '')
+                  .map((mensaje, index) => (
+                    <div
+                      className={`message ${mensaje.rol}`}
+                      key={`${index}-${mensaje.hora}`}
+                    >
+                      <span className="message-label">
+                        {mensaje.rol === 'usuario' ? 'Tú' : 'Asistente'}
+                        <span className="message-time">{mensaje.hora}</span>
+                      </span>
+                      <p>{mensaje.texto}</p>
 
-                    {mensaje.rol === 'asistente' && (
-                      <button
-                        className="speak-button"
-                        type="button"
-                        onClick={() => leerEnVozAlta(mensaje.texto)}
-                      >
-                        🔈 Escuchar respuesta
-                      </button>
-                    )}
-                  </div>
-                ))}
+                      {mensaje.rol === 'asistente' && (
+                        <button
+                          className="speak-button"
+                          type="button"
+                          onClick={() => leerEnVozAlta(mensaje.texto)}
+                        >
+                          🔈 Escuchar respuesta
+                        </button>
+                      )}
+                    </div>
+                  ))}
 
-              {cargandoRespuesta && (
+              {pensando && (
                 <div className="message asistente">
                   <span className="message-label">Asistente</span>
-                  <p className="thinking">Buscando la mejor opción…</p>
+                  <p className="thinking">Pensando…</p>
                 </div>
               )}
             </div>
