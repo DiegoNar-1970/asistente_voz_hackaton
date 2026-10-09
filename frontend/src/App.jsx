@@ -1,7 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import './App.css'
 
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000'
+// En producción sin VITE_API_URL se apunta al backend desplegado; en desarrollo
+// local a la instancia de la máquina (localhost:8000).
+const API_URL =
+  import.meta.env.VITE_API_URL ||
+  (import.meta.env.PROD
+    ? 'https://asistente-voz-hackaton.onrender.com'
+    : 'http://localhost:8000')
 
 const SALUDO_POR_DEFECTO =
   'Hola, ¿cómo estás? Soy la asistente virtual de la IPS. ' +
