@@ -412,16 +412,44 @@ def _cargar_lugares():
     LUGARES = nuevo
 
 
-def detectar_lugar(texto: str) -> dict | None:
+def detectar_lugares(texto: str) -> list[dict]:
+    """Todas las ciudades/departamentos mencionados, en orden de aparición.
+
+    Una pregunta puede nombrar varias ("...en Manizales y en Bogotá"); si solo
+    se buscaba una, la otra quedaba sin datos.
+    """
     if not LUGARES:
-        return None
+        return []
     texto = f" {texto} "
-    mejor = None
+    encontrados: list[tuple[int, str, dict]] = []
     for alias, info in LUGARES.items():
-        if f" {alias} " in texto:
-            if mejor is None or len(alias) > len(mejor[0]):
-                mejor = (alias, info)
-    return mejor[1] if mejor else None
+        posicion = texto.find(f" {alias} ")
+        if posicion >= 0:
+            encontrados.append((posicion, alias, info))
+
+    # En la misma posición gana el alias más largo ("bogota d c" > "bogota").
+    encontrados.sort(key=lambda item: (item[0], -len(item[1])))
+
+    elegidos: list[dict] = []
+    vistos: set[str] = set()
+    ultima_posicion = -10
+    for posicion, _, info in encontrados:
+        if posicion == ultima_posicion:
+            continue
+        clave = f"{info['campo']}:{info['valor']}"
+        if clave in vistos:
+            continue
+        vistos.add(clave)
+        elegidos.append(info)
+        ultima_posicion = posicion
+    return elegidos
+
+
+def detectar_lugar(texto: str) -> dict | None:
+    lugares = detectar_lugares(texto)
+    # La ciudad más reciente manda, por si el usuario se corrige
+    # ("no, soy de Bogotá").
+    return lugares[-1] if lugares else None
 
 
 def _calentar():
@@ -770,7 +798,14 @@ def _consultar_conteo(lugar: dict, servicio: str | None) -> tuple[int, str, bool
 # ---------------------------------------------------------------- prompts
 
 def prompt_redaccion(
-    pregunta, historial, filas, ciudad, servicio, recordada=False, extra=""
+    pregunta,
+    historial,
+    filas,
+    ciudad,
+    servicio,
+    recordada=False,
+    extra="",
+    bloques="",
 ) -> str:
     memoria_aviso = (
         "\n- La ciudad es un dato de contexto para ti. Úsala para responder, "
@@ -778,6 +813,11 @@ def prompt_redaccion(
         "'como indicaste'. Simplemente responde con normalidad."
         if recordada
         else ""
+    )
+    encabezado = (
+        "RESULTADOS POR CIUDAD (una consulta a la API por cada ciudad):"
+        if bloques
+        else f"RESULTADOS ({len(filas)} filas):"
     )
     return f"""
 Eres la asistente virtual de salud de una IPS en Colombia. Hablas en español,
@@ -810,6 +850,10 @@ REGLAS ESTRICTAS:
 - Si la pregunta tiene varias partes (por ejemplo "¿cuántos hay? y dame la
   dirección"), responde TODAS las partes, no solo una. Si pide 1 o 2
   ejemplos, da exactamente esa cantidad.
+- Si los RESULTADOS traen varias CIUDAD, responde la información de cada una,
+  diciendo a cuál pertenece cada dato. Si alguna ciudad aparece sin
+  registros, dilo con naturalidad: "no aparecen registros para X en los datos
+  disponibles" (nunca digas que no lo tenemos ni que no existe).
 {memoria_aviso}
 CONVERSACIÓN PREVIA:
 {historial or "(sin turnos previos)"}
@@ -818,8 +862,8 @@ PREGUNTA DEL USUARIO: {pregunta}
 CIUDAD: {ciudad}
 SERVICIO BUSCADO: {servicio or "no especificado"}
 
-RESULTADOS ({len(filas)} filas):
-{json.dumps(filas[:10], ensure_ascii=False)}
+{encabezado}
+{bloques or json.dumps(filas[:10], ensure_ascii=False)}
 {extra}
 """
 
@@ -996,6 +1040,65 @@ def brief():
     return BRIEF_CACHE["data"]
 
 
+def _consultar_varias_ciudades(lugares: list[dict], servicio: str | None) -> str:
+    """Una consulta por ciudad contra la API, filtrando en el servidor con
+    SoQL (no depende de los primeros 1000 registros). Devuelve un bloque de
+    resultados agrupados por ciudad para el prompt."""
+    secciones = []
+    for sitio in lugares:
+        ciudad = str(sitio.get("valor", "")).title()
+        try:
+            filas, _ = _datos_lugar(sitio, servicio)
+        except HTTPException:
+            filas = []
+
+        if not filas:
+            secciones.append(
+                f"CIUDAD {ciudad}:\n"
+                "Sin registros en los datos disponibles para esa ciudad."
+            )
+            continue
+
+        copias = []
+        for fila in filas:
+            item = dict(fila)
+            item["municipio"] = item.get("municipio") or ciudad
+            copias.append(item)
+
+        secciones.append(
+            f"CIUDAD {ciudad} ({len(copias)} registros):\n"
+            + json.dumps(copias, ensure_ascii=False)
+        )
+    return "\n\n".join(secciones)
+
+
+def _resumen_varias_ciudades(bloques: str) -> str:
+    """Reserva local (sin LLM): cuenta qué ciudades sí traen registros."""
+    con_datos: list[str] = []
+    sin_datos: list[str] = []
+
+    for bloque in bloques.split("\n\n"):
+        cabecera = bloque.split("\n", 1)[0]
+        ciudad = cabecera.replace("CIUDAD ", "").split(" (")[0].strip(": ").title()
+        if not ciudad:
+            continue
+        if "Sin registros" in bloque:
+            sin_datos.append(ciudad)
+        else:
+            con_datos.append(ciudad)
+
+    frases = []
+    if con_datos:
+        frases.append(f"Sí tengo registros para {', '.join(con_datos)}.")
+    if sin_datos:
+        frases.append(
+            f"Para {', '.join(sin_datos)} no aparecen registros en los datos "
+            "disponibles."
+        )
+    frases.append("¿Sobre qué ciudad quieres que profundice?")
+    return " ".join(frases)
+
+
 def _historial_texto(historial: list[dict]) -> str:
     ultimo = historial[-6:] if historial else []
     return "\n".join(
@@ -1146,19 +1249,13 @@ def chat(datos: PreguntaRequest):
             media_type="text/plain; charset=utf-8",
         )
 
-    lugar = detectar_lugar(entrada)
+    mencionados = detectar_lugares(entrada)
+    lugar = mencionados[-1] if mencionados else None
     recordada = False
     if lugar is None and memoria["lugar"]:
         # El usuario no repitió la ciudad: la tomamos de la memoria.
         lugar = memoria["lugar"]
         recordada = True
-
-    # 3) Emergencia: primero salvar la vida, no consultar la base de datos.
-    if _es_emergencia(entrada):
-        return StreamingResponse(
-            iter([respuesta_emergencia(lugar)]),
-            media_type="text/plain; charset=utf-8",
-        )
 
     servicio = detectar_servicio(entrada)
     # Solo se hereda el servicio de un turno anterior si la nueva pregunta no
@@ -1173,6 +1270,36 @@ def chat(datos: PreguntaRequest):
     if servicio is None and memoria["servicio"] and recordada and not menciona_entidad:
         # Seguimiento ("¿cuántas camas hay?") sin repetir el servicio.
         servicio = memoria["servicio"]
+
+    # 3) Emergencia: primero salvar la vida, no consultar la base de datos.
+    if _es_emergencia(entrada):
+        return StreamingResponse(
+            iter([respuesta_emergencia(lugar)]),
+            media_type="text/plain; charset=utf-8",
+        )
+
+    # 4) Varias ciudades en la misma pregunta: una consulta a la API por ciudad
+    #    (filtra en el servidor, no depende de los primeros 1000 registros).
+    if len(mencionados) > 1:
+        pasos = _consultar_varias_ciudades(mencionados, servicio)
+        prompt = prompt_redaccion(
+            pregunta,
+            historial_texto,
+            [],
+            "varias ciudades",
+            servicio,
+            False,
+            "",
+            pasos,
+        )
+        respaldo = _cierre(_resumen_varias_ciudades(pasos))
+        return StreamingResponse(
+            (
+                limpiar_markdown(t, trim=False)
+                for t in stream_con_recurso(prompt, respaldo, espera=5.0)
+            ),
+            media_type="text/plain; charset=utf-8",
+        )
 
     pide_conteo = bool(re.search(r"\bcu[ánta]nt[oa]s?\b|\btotal\b", entrada))
     # Conteo compuesto: pide además direcciones, nombres o listado.
