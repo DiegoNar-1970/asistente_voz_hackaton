@@ -13,3 +13,6 @@ frontend/.env.local
 # Sistema
 .DS_Store
 Thumbs.db
+
+# Documentación interna de sustentación
+SISTEMA.md
