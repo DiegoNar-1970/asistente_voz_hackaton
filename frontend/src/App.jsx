@@ -3,6 +3,24 @@ import './App.css'
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 
+const SALUDO_POR_DEFECTO =
+  'Hola, ¿cómo estás? Soy la asistente virtual de la IPS. ' +
+  'Dime en qué te puedo ayudar y en qué ciudad estás.'
+
+const EMOJI = {
+  alegria: '😄',
+  satisfaccion: '😊',
+  serenidad: '😌',
+  curiosidad: '🤔',
+  confusion: '😕',
+  preocupacion: '😟',
+  ansiedad: '😰',
+  frustracion: '😤',
+  enojo: '😠',
+  tristeza: '😢',
+  neutral: '🙂',
+}
+
 function hora() {
   return new Date().toLocaleTimeString('es-CO', {
     hour: '2-digit',
@@ -30,21 +48,31 @@ function App() {
 
   const [brief, setBrief] = useState(null)
   const [cargandoBrief, setCargandoBrief] = useState(true)
+  const [inicio, setInicio] = useState(false)
+  const [saludo, setSaludo] = useState(SALUDO_POR_DEFECTO)
+  const [sugerencias, setSugerencias] = useState([])
   const [preguntas, setPreguntas] = useState([])
   const [pregunta, setPregunta] = useState('')
   const [mensajes, setMensajes] = useState([])
   const [cargandoRespuesta, setCargandoRespuesta] = useState(false)
   const [escuchando, setEscuchando] = useState(false)
   const [error, setError] = useState('')
-  const [emocion, setEmocion] = useState(null)
+  const [analisis, setAnalisis] = useState([])
   const [vozActiva, setVozActiva] = useState(true)
 
-  const cargarBrief = useCallback(async () => {
+  const cargarInicial = useCallback(async () => {
     try {
-      const response = await fetch(`${API_URL}/api/brief`)
-      const data = await leerJson(response)
-      setBrief(data)
-      setPreguntas(data.preguntas_sugeridas || [])
+      const [rBrief, rSaludo] = await Promise.all([
+        fetch(`${API_URL}/api/brief`),
+        fetch(`${API_URL}/api/greeting`),
+      ])
+      const dBrief = await leerJson(rBrief)
+      const dSaludo = await leerJson(rSaludo)
+
+      setBrief(dBrief)
+      setPreguntas(dBrief.preguntas_sugeridas || [])
+      setSaludo(dSaludo.mensaje || SALUDO_POR_DEFECTO)
+      setSugerencias(dSaludo.sugerencias || [])
     } catch (err) {
       setError(
         err.message ||
@@ -56,9 +84,9 @@ function App() {
   }, [])
 
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- carga inicial del brief desde la API
-    cargarBrief()
-  }, [cargarBrief])
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- carga inicial desde la API
+    cargarInicial()
+  }, [cargarInicial])
 
   function leerEnVozAlta(texto) {
     if (!('speechSynthesis' in window) || !vozActiva) return
@@ -76,34 +104,62 @@ function App() {
       const response = await fetch(`${API_URL}/api/emotion`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ texto }),
+        body: JSON.stringify({ texto, rol: 'usuario' }),
       })
-      const data = await leerJson(response)
-      setEmocion(data)
+      return await leerJson(response)
     } catch {
-      /* el panel de emoción es opcional */
+      return null
     }
+  }
+
+  function iniciarAsistente() {
+    setInicio(true)
+    setMensajes([{ rol: 'asistente', texto: saludo, hora: hora() }])
+    leerEnVozAlta(saludo)
   }
 
   async function enviarPregunta(texto = pregunta) {
     const textoPregunta = texto.trim()
 
-    if (!textoPregunta || cargandoRespuesta) return
+    if (!textoPregunta || cargandoRespuesta || !inicio) return
 
     setPregunta('')
     setError('')
+
+    const historial = mensajes.map((m) => ({ rol: m.rol, texto: m.texto }))
+    const marcaHora = hora()
+
     setMensajes((actuales) => [
       ...actuales,
-      { rol: 'usuario', texto: textoPregunta, hora: hora() },
+      { rol: 'usuario', texto: textoPregunta, hora: marcaHora },
     ])
     setCargandoRespuesta(true)
-    clasificarEmocion(textoPregunta)
+
+    clasificarEmocion(textoPregunta).then((analisisUsuario) => {
+      if (!analisisUsuario) return
+      setMensajes((actuales) =>
+        actuales.map((m) =>
+          m.hora === marcaHora && m.rol === 'usuario'
+            ? { ...m, emocion: analisisUsuario }
+            : m,
+        ),
+      )
+      setAnalisis((actuales) => [
+        ...actuales,
+        {
+          ...analisisUsuario,
+          rol: 'usuario',
+          texto: textoPregunta,
+          hora: marcaHora,
+        },
+      ])
+    })
 
     try {
       const response = await fetch(`${API_URL}/api/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ pregunta: textoPregunta }),
+        body: JSON.stringify({ pregunta: textoPregunta, historial }),
       })
 
       const data = await leerJson(response)
@@ -181,6 +237,12 @@ function App() {
   }
 
   const totalRegistros = brief?.total_registros?.[0]?.total
+  const emocionActual = analisis[analisis.length - 1] || null
+  const conteo = analisis.reduce((acc, item) => {
+    acc[item.sentimiento] = (acc[item.sentimiento] || 0) + 1
+    return acc
+  }, {})
+  const totalAnalisis = analisis.length || 1
 
   return (
     <main className="app-shell">
@@ -208,12 +270,12 @@ function App() {
       </header>
 
       <section className="hero">
-        <span className="eyebrow">DATOS ABIERTOS DE SALUD, UNA CONVERSACIÓN</span>
-        <h1>Habla con las IPS de Colombia.</h1>
+        <span className="eyebrow">ASISTENTE DE SALUD POR VOZ · DATOS ABIERTOS</span>
+        <h1>Habla con la red de IPS de Colombia.</h1>
         <p>
-          Pregunta por voz o por texto sobre la red de Instituciones
-          Prestadoras de Servicios de Salud y su capacidad instalada. Las
-          respuestas se construyen con datos reales de datos.gov.co.
+          Cuéntame tu necesidad de salud y tu ciudad. Con la «Relación de IPS»
+          de datos.gov.co te oriento sobre instituciones y capacidad instalada,
+          y analizo el tono de nuestra conversación en vivo.
         </p>
       </section>
 
@@ -258,9 +320,8 @@ function App() {
           <div className="privacy-note">
             <span>ⓘ</span>
             <p>
-              La fuente es la «Relación de IPS públicas y privadas según el
-              nivel de atención y capacidad instalada» publicada en
-              datos.gov.co.
+              Cada consulta lee máximo 1.000 filas de datos.gov.co. No se
+              almacena información personal.
             </p>
           </div>
         </aside>
@@ -270,59 +331,92 @@ function App() {
             <div className="section-heading">
               <span className="step-number">02</span>
               <div>
-                <h2>Conversa con los datos</h2>
-                <p>Pregunta por voz o por texto.</p>
+                <h2>Conversa con la asistente</h2>
+                <p>Responde por voz o por texto.</p>
               </div>
             </div>
 
             <div className="chat-history" aria-live="polite">
-              {mensajes.length === 0 && (
-                <div className="chat-welcome">
+              {!inicio && (
+                <div className="start-card">
                   <span className="chat-sparkle">✳</span>
-                  <p>Pulsa el micrófono y pregunta, por ejemplo:</p>
-                  <p className="chat-example">
-                    «¿Cuántas camas hay en Medellín?»
+                  <strong>Asistente virtual de la IPS</strong>
+                  <p>
+                    Pulsa para que la asistente te salude por voz y te pregunte
+                    en qué te puede ayudar.
                   </p>
+                  <button
+                    type="button"
+                    className="primary-button start-button"
+                    onClick={iniciarAsistente}
+                    disabled={cargandoBrief}
+                  >
+                    🔈 Iniciar asistente
+                  </button>
                 </div>
               )}
 
-              {mensajes.map((mensaje, index) => (
-                <div
-                  className={`message ${mensaje.rol}`}
-                  key={`${index}-${mensaje.hora}`}
-                >
-                  <span className="message-label">
-                    {mensaje.rol === 'usuario' ? 'Tú' : 'Vocal'}
-                    <span className="message-time">{mensaje.hora}</span>
-                  </span>
-                  <p>{mensaje.texto}</p>
-
-                  {mensaje.rol === 'asistente' && (
-                    <button
-                      className="speak-button"
-                      type="button"
-                      onClick={() => leerEnVozAlta(mensaje.texto)}
-                    >
-                      🔈 Escuchar respuesta
-                    </button>
-                  )}
-
-                  {mensaje.consulta && (
-                    <span className="query-chip">
-                      Consulta: {JSON.stringify(mensaje.consulta)} ·{' '}
-                      {mensaje.filas} filas
+              {inicio &&
+                mensajes.map((mensaje, index) => (
+                  <div
+                    className={`message ${mensaje.rol}`}
+                    key={`${index}-${mensaje.hora}`}
+                  >
+                    <span className="message-label">
+                      {mensaje.rol === 'usuario' ? 'Tú' : 'Asistente'}
+                      <span className="message-time">{mensaje.hora}</span>
+                      {mensaje.emocion && (
+                        <span className="msg-emotion">
+                          {EMOJI[mensaje.emocion.emocion] || '🙂'}{' '}
+                          {mensaje.emocion.emocion}
+                        </span>
+                      )}
                     </span>
-                  )}
-                </div>
-              ))}
+                    <p>{mensaje.texto}</p>
+
+                    {mensaje.rol === 'asistente' && (
+                      <button
+                        className="speak-button"
+                        type="button"
+                        onClick={() => leerEnVozAlta(mensaje.texto)}
+                      >
+                        🔈 Escuchar respuesta
+                      </button>
+                    )}
+
+                    {mensaje.consulta && (
+                      <span className="query-chip">
+                        Consulta: {JSON.stringify(mensaje.consulta)} ·{' '}
+                        {mensaje.filas} filas
+                      </span>
+                    )}
+                  </div>
+                ))}
 
               {cargandoRespuesta && (
                 <div className="message asistente">
-                  <span className="message-label">Vocal</span>
-                  <p className="thinking">Consultando los datos…</p>
+                  <span className="message-label">Asistente</span>
+                  <p className="thinking">
+                    Consultando datos y analizando la conversación…
+                  </p>
                 </div>
               )}
             </div>
+
+            {inicio && sugerencias.length > 0 && mensajes.length <= 1 && (
+              <div className="suggestion-list inline">
+                {sugerencias.map((item) => (
+                  <button
+                    key={item}
+                    className="suggestion-button"
+                    onClick={() => enviarPregunta(item)}
+                  >
+                    <span>{item}</span>
+                    <span className="suggestion-arrow">↗</span>
+                  </button>
+                ))}
+              </div>
+            )}
 
             <form
               className="chat-form"
@@ -335,8 +429,8 @@ function App() {
                 className={`mic-button ${escuchando ? 'mic-active' : ''}`}
                 type="button"
                 onClick={iniciarMicrofono}
-                disabled={cargandoRespuesta}
-                aria-label="Dictar pregunta"
+                disabled={cargandoRespuesta || !inicio}
+                aria-label="Dictar mensaje"
               >
                 🎙
               </button>
@@ -345,23 +439,28 @@ function App() {
                 value={pregunta}
                 onChange={(event) => setPregunta(event.target.value)}
                 placeholder={
-                  escuchando ? 'Escuchando…' : 'Escribe o dicta tu pregunta…'
+                  !inicio
+                    ? 'Inicia la asistente para hablar'
+                    : escuchando
+                      ? 'Escuchando…'
+                      : 'Escribe o dicta tu necesidad y ciudad…'
                 }
-                disabled={cargandoRespuesta}
-                aria-label="Tu pregunta"
+                disabled={cargandoRespuesta || !inicio}
+                aria-label="Tu mensaje"
               />
               <button
                 className="send-button"
                 type="submit"
-                disabled={!pregunta.trim() || cargandoRespuesta}
-                aria-label="Enviar pregunta"
+                disabled={!pregunta.trim() || cargandoRespuesta || !inicio}
+                aria-label="Enviar"
               >
                 ↑
               </button>
             </form>
 
             <p className="chat-footnote">
-              La IA puede cometer errores. Verifica las respuestas importantes.
+              La asistente orienta con datos abiertos y no reemplaza una
+              valoración médica.
             </p>
           </section>
 
@@ -369,52 +468,89 @@ function App() {
             <div className="section-heading">
               <span className="step-number">03</span>
               <div>
-                <h2>Transcripción y emociones</h2>
-                <p>Habla identificado por turno y análisis en vivo.</p>
+                <h2>Sentimiento y emociones en vivo</h2>
+                <p>Análisis del tono de cada turno mientras la conversación ocurre.</p>
               </div>
             </div>
 
             <div className="emotion-panel">
-              <span className="emotion-panel-label">Tono de la conversación</span>
               <div className="emotion-current">
-                <span
-                  className={`emotion-dot ${
-                    emocion?.sentimiento || 'neutral'
-                  }`}
-                />
-                <strong>{emocion?.emocion || 'neutral'}</strong>
-                <span className="emotion-sent">
-                  {emocion?.sentimiento || 'neutral'}
+                <span className="emotion-emoji">
+                  {emocionActual
+                    ? EMOJI[emocionActual.emocion] || '🙂'
+                    : '💬'}
+                </span>
+                <div className="emotion-headline">
+                  <strong>
+                    {emocionActual ? emocionActual.emocion : 'sin analizar'}
+                  </strong>
+                  <span className={`emotion-tag ${emocionActual?.sentimiento || 'neutral'}`}>
+                    {emocionActual?.sentimiento || 'neutral'}
+                  </span>
+                </div>
+                <span className="emotion-intensity">
+                  Intensidad {Math.round((emocionActual?.intensidad || 0) * 100)}%
                 </span>
               </div>
+
               <span className="emotion-bar">
                 <i
                   style={{
-                    width: `${Math.round((emocion?.intensidad || 0) * 100)}%`,
+                    width: `${Math.round((emocionActual?.intensidad || 0) * 100)}%`,
                   }}
                 />
               </span>
+
+              {emocionActual?.explicacion && (
+                <p className="emotion-explication">{emocionActual.explicacion}</p>
+              )}
+
+              {analisis.length > 0 && (
+                <div className="emotion-dist">
+                  {['positivo', 'neutral', 'negativo'].map((clave) => (
+                    <span
+                      key={clave}
+                      className={`emotion-seg ${clave}`}
+                      style={{
+                        width: `${((conteo[clave] || 0) / totalAnalisis) * 100}%`,
+                      }}
+                    />
+                  ))}
+                </div>
+              )}
+
+              {analisis.length > 0 && (
+                <div className="emotion-legend">
+                  {['positivo', 'neutral', 'negativo'].map((clave) => (
+                    <span key={clave}>
+                      <i className={`emotion-dot ${clave}`} /> {clave}:{' '}
+                      {conteo[clave] || 0}
+                    </span>
+                  ))}
+                </div>
+              )}
             </div>
 
-            <div className="transcript-box">
-              {mensajes.length === 0 ? (
+            <div className="analysis-timeline">
+              {analisis.length === 0 ? (
                 <p className="transcript-empty">
-                  La transcripción aparecerá aquí a medida que hablen.
+                  El análisis emocional aparecerá aquí con cada mensaje.
                 </p>
               ) : (
-                mensajes.map((mensaje, index) => (
-                  <div className="transcript-item" key={`t-${index}`}>
-                    <div className="transcript-meta">
-                      <span
-                        className={`transcript-speaker ${
-                          mensaje.rol === 'usuario' ? 'spk-a' : 'spk-b'
-                        }`}
-                      >
-                        {mensaje.rol === 'usuario' ? 'Hablante 1 · Tú' : 'Hablante 2 · Vocal'}
-                      </span>
-                      <span className="transcript-time">{mensaje.hora}</span>
+                analisis.map((item, index) => (
+                  <div className="analysis-item" key={`a-${index}`}>
+                    <span className="analysis-emoji">
+                      {EMOJI[item.emocion] || '🙂'}
+                    </span>
+                    <div className="analysis-body">
+                      <div className="analysis-meta">
+                        <span className={`emotion-tag ${item.sentimiento}`}>
+                          {item.emocion}
+                        </span>
+                        <span className="transcript-time">{item.hora}</span>
+                      </div>
+                      <p>{item.texto}</p>
                     </div>
-                    <p>{mensaje.texto}</p>
                   </div>
                 ))
               )}
@@ -423,14 +559,14 @@ function App() {
             {preguntas.length > 0 && (
               <div className="suggestions">
                 <h3>Preguntas para explorar</h3>
-                <p>Selecciona una para iniciar la conversación.</p>
+                <p>Selecciona una si quieres una idea.</p>
                 <div className="suggestion-list">
                   {preguntas.map((item, index) => (
                     <button
                       key={`${index}-${item}`}
                       className="suggestion-button"
                       onClick={() => enviarPregunta(item)}
-                      disabled={cargandoRespuesta}
+                      disabled={cargandoRespuesta || !inicio}
                     >
                       <span>{item}</span>
                       <span className="suggestion-arrow">↗</span>
@@ -454,7 +590,7 @@ function App() {
 
       <footer className="footer">
         <span>Vocal Cognitivo · Kognia Labs</span>
-        <span>Agente de voz sobre datos abiertos de salud</span>
+        <span>Asistente de voz sobre datos abiertos de salud</span>
       </footer>
     </main>
   )

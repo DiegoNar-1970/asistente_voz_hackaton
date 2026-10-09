@@ -25,6 +25,9 @@ DATASET_URL = os.getenv(
 )
 APP_TOKEN = os.getenv("SOCRATA_APP_TOKEN")
 
+# La API de datos.gov.co devuelve 1000 filas por defecto: no pedimos más.
+MAX_FILAS = 1000
+
 app = FastAPI(title="Agente Vocal Cognitivo - IPS Colombia")
 
 origenes = os.getenv("CORS_ORIGINS", "*")
@@ -91,10 +94,12 @@ CAMPOS_PERMITIDOS = {
 
 class PreguntaRequest(BaseModel):
     pregunta: str
+    historial: list[dict] = []
 
 
 class TextoRequest(BaseModel):
     texto: str
+    rol: str = "usuario"
 
 
 def limpiar_json(texto: str) -> str:
@@ -133,6 +138,13 @@ def consultar_dataset(params: dict) -> list:
         for clave, valor in params.items()
         if clave in CAMPOS_PERMITIDOS and valor not in (None, "")
     }
+
+    if "$limit" in limpios:
+        try:
+            limpios["$limit"] = str(min(int(limpios["$limit"]), MAX_FILAS))
+        except (TypeError, ValueError):
+            limpios["$limit"] = str(MAX_FILAS)
+
     cabeceras = {"Accept": "application/json"}
     if APP_TOKEN:
         cabeceras["X-App-Token"] = APP_TOKEN
@@ -165,6 +177,21 @@ BRIEF_CACHE = {"data": None}
 @app.get("/api/health")
 def health():
     return {"status": "ok", "modelo": MODELO, "fuente": DATASET_URL}
+
+
+@app.get("/api/greeting")
+def greeting():
+    return {
+        "mensaje": (
+            "Hola, ¿cómo estás? Soy la asistente virtual de la IPS. "
+            "Dime en qué te puedo ayudar y en qué ciudad estás."
+        ),
+        "sugerencias": [
+            "Estoy en Medellín y necesito saber dónde hay urgencias.",
+            "¿Qué IPS con camas hay en Bogotá?",
+            "Busco consulta externa en Cali.",
+        ],
+    }
 
 
 @app.get("/api/brief")
@@ -247,56 +274,77 @@ def chat(datos: PreguntaRequest):
     if not pregunta:
         raise HTTPException(status_code=400, detail="Escribe una pregunta.")
 
+    historial = datos.historial[-8:] if datos.historial else []
+    historial_texto = "\n".join(
+        f"{'Usuario' if m.get('rol') == 'usuario' else 'Asistente'}: "
+        f"{m.get('texto', '')}"
+        for m in historial
+    )
+
     prompt_plan = f"""
-Eres un traductor de preguntas a consultas SoQL sobre este conjunto de datos.
+Eres la asistente virtual de una red de IPS (Instituciones Prestadoras de
+Servicios de Salud) en Colombia. Ayudas a un usuario con su necesidad de salud
+usando exclusivamente la Relación de IPS de datos.gov.co.
 {ESQUEMA}
 {SOQL_AYUDA}
 
-Decide una acción:
-- "consultar": si hace falta leer datos para responder. Devuelve "params".
-- "fuera_de_alcance": si la pregunta no trata sobre estas IPS/datos de salud.
+CONVERSACIÓN PREVIA:
+{historial_texto or "(sin turnos previos)"}
 
-Devuelve únicamente JSON válido:
-{{"accion": "consultar", "params": {{"$select": "...", "$where": "..."}},
-  "razon": "..."}}
-o
-{{"accion": "fuera_de_alcance", "razon": "..."}}
+PREGUNTA ACTUAL DEL USUARIO: {pregunta}
 
-PREGUNTA: {pregunta}
+Decide una acción y devuelve SOLO JSON válido:
+- "consultar": necesitas leer datos. Incluye "params".
+  Si el usuario mencionó ciudad/municipio, filtra por municipio o departamento.
+  Si menciona un servicio, filtra por nom_grupo_capacidad o
+  nom_descripcion_capacidad (ej. "Urgencias", "Consulta Externa", "Partos").
+  {{"accion":"consultar","params":{{"$select":"...","$where":"...","$limit":"20"}}}}
+- "pedir_datos": aún no sabes la ciudad o la necesidad. Incluye "respuesta"
+  con una pregunta breve y amable.
+  {{"accion":"pedir_datos","respuesta":"..."}}
+- "fuera_de_alcance": no trata sobre salud/IPS.
+  {{"accion":"fuera_de_alcance","respuesta":"..."}}
 """
 
-    plan_texto = consultar_gemini(prompt_plan)
-
     try:
-        plan = json.loads(limpiar_json(plan_texto))
+        plan = json.loads(limpiar_json(consultar_gemini(prompt_plan)))
     except (json.JSONDecodeError, ValueError):
-        plan = {"accion": "fuera_de_alcance", "razon": "No se pudo interpretar."}
+        plan = {"accion": "pedir_datos", "respuesta": (
+            "¿Me cuentas en qué ciudad estás y qué necesitas de salud?"
+        )}
 
-    if plan.get("accion") != "consultar" or not plan.get("params"):
+    accion = plan.get("accion")
+
+    if accion != "consultar" or not plan.get("params"):
+        respuesta = plan.get("respuesta") or (
+            "Solo puedo ayudarte con información de las IPS de Colombia y su "
+            "capacidad instalada."
+        )
         return {
             "pregunta": pregunta,
-            "respuesta": (
-                "Solo puedo responder sobre la Relación de IPS públicas y "
-                "privadas de Colombia y su capacidad instalada. Esa pregunta "
-                "queda fuera de la fuente de datos."
-            ),
+            "respuesta": respuesta,
+            "accion": accion or "pedir_datos",
             "consulta": None,
             "filas": 0,
             "datos": [],
         }
 
     params = dict(plan["params"])
-    params.setdefault("$limit", "25")
+    params.setdefault("$limit", "20")
     filas = consultar_dataset(params)
 
     prompt_respuesta = f"""
-Eres un asistente experto en salud en Colombia. Responde en español, breve y claro.
-Usa EXCLUSIVAMENTE los datos devueltos por la consulta. No inventes cifras.
-Si vienen 0 filas, dilo con naturalidad.
-Puedes redondear o sumar cuando tenga sentido.
+Eres la asistente virtual de una red de IPS en Colombia. Hablas en español,
+cercana y clara. Ayudas a la persona con su necesidad de salud usando
+EXCLUSIVAMENTE los datos de la consulta. No das diagnósticos médicos: orientas
+sobre instituciones y su capacidad instalada.
+- Responde en 2 a 4 frases. Si listas opciones, usa viñetas cortas.
+- Si vienen 0 filas, dilo con naturalidad y propón ampliar la búsqueda.
 
-PREGUNTA: {pregunta}
-CONSULTA SOQL: {json.dumps(params, ensure_ascii=False)}
+CONVERSACIÓN PREVIA:
+{historial_texto or "(sin turnos previos)"}
+
+PREGUNTA DEL USUARIO: {pregunta}
 RESULTADOS ({len(filas)} filas):
 {json.dumps(filas[:30], ensure_ascii=False)}
 """
@@ -306,6 +354,7 @@ RESULTADOS ({len(filas)} filas):
     return {
         "pregunta": pregunta,
         "respuesta": respuesta,
+        "accion": "consultar",
         "consulta": params,
         "filas": len(filas),
         "datos": filas[:10],
@@ -316,19 +365,41 @@ RESULTADOS ({len(filas)} filas):
 def emotion(datos: TextoRequest):
     texto = datos.texto.strip()
     if not texto:
-        return {"sentimiento": "neutral", "emocion": "neutral", "intensidad": 0}
+        return {
+            "sentimiento": "neutral",
+            "emocion": "neutral",
+            "intensidad": 0.0,
+            "explicacion": "",
+        }
 
     prompt = f"""
-Clasifica el tono emocional del siguiente texto de una conversación en español.
-Devuelve únicamente JSON válido:
-{{"sentimiento": "positivo|neutral|negativo",
-  "emocion": "curiosidad|satisfaccion|alegria|confusion|frustracion|neutral",
-  "intensidad": 0.0}}
+Eres un analista experto en sentimiento y emociones. Analiza el siguiente
+turno de una conversación en español ("{datos.rol}") entre un usuario y la
+asistente virtual de una IPS (búsqueda de ayuda de salud).
+Devuelve SOLO JSON válido:
+{{
+  "sentimiento": "positivo|neutral|negativo",
+  "emocion": "alegria|satisfaccion|serenidad|curiosidad|confusion|preocupacion|ansiedad|frustracion|enojo|tristeza|neutral",
+  "intensidad": 0.0,
+  "explicacion": "frase muy corta en español que justifique"
+}}
+La intensidad va de 0.0 (nula) a 1.0 (muy intensa).
 
 TEXTO: {texto}
 """
     resultado = consultar_gemini(prompt)
+
     try:
-        return json.loads(limpiar_json(resultado))
+        analisis = json.loads(limpiar_json(resultado))
+        analisis.setdefault("sentimiento", "neutral")
+        analisis.setdefault("emocion", "neutral")
+        analisis.setdefault("intensidad", 0.3)
+        analisis.setdefault("explicacion", "")
+        return analisis
     except (json.JSONDecodeError, ValueError):
-        return {"sentimiento": "neutral", "emocion": "neutral", "intensidad": 0.3}
+        return {
+            "sentimiento": "neutral",
+            "emocion": "neutral",
+            "intensidad": 0.3,
+            "explicacion": "",
+        }
