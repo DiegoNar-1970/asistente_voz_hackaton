@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import './App.css'
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000'
@@ -9,6 +9,20 @@ function hora() {
     minute: '2-digit',
     second: '2-digit',
   })
+}
+
+async function leerJson(response) {
+  const data = await response.json().catch(() => ({}))
+
+  if (!response.ok) {
+    throw new Error(
+      typeof data.detail === 'string'
+        ? data.detail
+        : 'No se pudo completar la operación.',
+    )
+  }
+
+  return data
 }
 
 function App() {
@@ -25,28 +39,7 @@ function App() {
   const [emocion, setEmocion] = useState(null)
   const [vozActiva, setVozActiva] = useState(true)
 
-  useEffect(() => {
-    cargarBrief()
-  }, [])
-
-  async function leerJson(response) {
-    const data = await response.json().catch(() => ({}))
-
-    if (!response.ok) {
-      throw new Error(
-        typeof data.detail === 'string'
-          ? data.detail
-          : 'No se pudo completar la operación.',
-      )
-    }
-
-    return data
-  }
-
-  async function cargarBrief() {
-    setCargandoBrief(true)
-    setError('')
-
+  const cargarBrief = useCallback(async () => {
     try {
       const response = await fetch(`${API_URL}/api/brief`)
       const data = await leerJson(response)
@@ -60,7 +53,12 @@ function App() {
     } finally {
       setCargandoBrief(false)
     }
-  }
+  }, [])
+
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- carga inicial del brief desde la API
+    cargarBrief()
+  }, [cargarBrief])
 
   function leerEnVozAlta(texto) {
     if (!('speechSynthesis' in window) || !vozActiva) return
