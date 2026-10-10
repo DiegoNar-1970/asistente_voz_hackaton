@@ -146,17 +146,37 @@ DOC_CLAVES = (
 )
 
 
+DATASET_CLAVES = (
+    "ips", "hospital", "hospitales", "sede", "sedes", "clinica", "clinicas",
+    "prestador", "prestadores", "municipio", "municipios", "direccion",
+    "direcciones", "telefono", "telefonos", "camas", "urgencias",
+    "establecimiento", "establecimientos", "capacidad", "capacidades",
+    "eps", "ambulancia", "ambulancias",
+)
+
+
+def _es_consulta_de_datos(texto: str) -> bool:
+    """¿La pregunta es por hospitales/IPS/servicios? Eso se responde con
+    datos.gov.co, aunque haya un documento cargado."""
+    if detectar_lugares(texto) or detectar_servicio(texto):
+        return True
+    return any(clave in texto for clave in DATASET_CLAVES)
+
+
 def _pregunta_del_documento(texto: str) -> bool:
     """Decide si la pregunta va dirigida al documento cargado (P4 del guion).
 
     El documento NO es la fuente de verdad: solo se usa cuando el usuario
-    habla de él o cuando la pregunta comparte términos con su contenido.
+    habla explícitamente de él. Si la pregunta comparte términos con el
+    documento pero es una consulta de hospitales/IPS, manda datos.gov.co.
     """
     if not DOCUMENTO.get("texto"):
         return False
     if any(clave in texto for clave in DOC_CLAVES):
         return True
     if len(texto) < 12:
+        return False
+    if _es_consulta_de_datos(texto):
         return False
     palabras_documento = set(
         re.findall(r"[a-z]{5,}", normalizar(DOCUMENTO["texto"])[:4000])
@@ -170,11 +190,19 @@ def prompt_documento(pregunta: str, historial: str) -> str:
 responder preguntas sobre él.
 
 REGLAS:
-- Responde SOLO con información que esté en el DOCUMENTO.
-- Si la respuesta no está en el documento, dilo con naturalidad. No inventes.
+- Responde con lo que dice el DOCUMENTO sobre eso. Es una fuente aparte de la
+  base de datos de hospitales e IPS.
+- Si la respuesta no está en el documento, dilo en UNA frase y varía siempre la
+  forma de decirlo ("en el archivo no aparece", "ese tema no lo menciona", "no
+  está en el documento"): nunca repitas la misma fórmula. No inventes.
+- Si te preguntan por hospitales, IPS, sedes, direcciones, teléfonos o por una
+  ciudad y el documento no lo cubre, no te quedes en el "no está": ofrece
+  buscarlo en la base de datos ("En el documento no aparece eso; ¿quieres que
+  lo busque en la base de datos?"). Si la pregunta sí está en el documento,
+  respóndela normalmente sin ofrecer la base.
 - Entre 2 y 4 frases. Sin markdown, sin asteriscos, sin emojis, en español.
   Sé breve: mejor una respuesta corta.
-- NO saludes ni empieces con "Hola".
+- NO saludos ni empieces con "Hola".
 - Cierra con UNA frase que haga avanzar la conversación: una pregunta breve
   sobre el documento o un consejo práctico. NO uses "¿Hay algo más en que te
   pueda ayudar?". Ejemplos: "Si quieres, te resumo el punto 3.",
@@ -621,15 +649,15 @@ FRASE_GASTADA = re.compile(
 PATRON_EMERGENCIA = re.compile(
     r"\b(morir\w*|muerte|muriendo|a punto de morir|paro|infarto|"
     r"no respiro|no puedo respirar|le cuesta respirar|desmay\w*|"
-    r"sin conciencia|no despierta|hemorragia|sangrado|sangre a raudales|"
+    r"sin conciencia|no despierta|hemorragia|sangr\w*|sangre a raudales|"
     r"accidente|atropell\w*|choque|convuls\w*|sobredosis|intoxic\w*|"
     r"quemadura grave|fractura abierta|emergencia|socorro|me estoy muriendo)\b",
     re.I,
 )
 # Búsquedas de ubicación ("¿dónde hay urgencias?") no son una emergencia.
 NO_EMERGENCIA = re.compile(
-    r"\bd[oó]nde\b|\bcu[áa]nt[oa]s?\b|\bcu[áa]l(?:es)?\b|"
-    r"\bhay urgencias\b|\best[áa]\b|\bdirecci\w*\b",
+    r"\bd[óo]nde\b|\bcu[áa]nt[oa]s?\b|\bcu[áa]l(?:es)?\b|"
+    r"\bhay urgencias\b|\bdirecci\w*\b",
     re.I,
 )
 
@@ -1332,24 +1360,6 @@ def chat(datos: PreguntaRequest):
             media_type="text/plain; charset=utf-8",
         )
 
-    # 2) Documento cargado: si la pregunta va por él, respondemos con él.
-    if _pregunta_del_documento(entrada):
-        respaldo_doc = _cierre(
-            f"Según «{DOCUMENTO.get('nombre', 'el documento')}»: "
-            f"{DOCUMENTO.get('resumen', 'no pude resumirlo.')}"
-        )
-        return StreamingResponse(
-            _stream_limpio(
-                limpiar_markdown(t, trim=False)
-                for t in stream_con_recurso(
-                    prompt_documento(pregunta, historial_texto),
-                    respaldo_doc,
-                    espera=5.0,
-                )
-            ),
-            media_type="text/plain; charset=utf-8",
-        )
-
     mencionados = detectar_lugares(entrada)
     lugar = mencionados[-1] if mencionados else None
     recordada = False
@@ -1372,10 +1382,29 @@ def chat(datos: PreguntaRequest):
         # Seguimiento ("¿cuántas camas hay?") sin repetir el servicio.
         servicio = memoria["servicio"]
 
-    # 3) Emergencia: primero salvar la vida, no consultar la base de datos.
+    # 2) Emergencia: primero salvar la vida, sin importar nada más.
     if _es_emergencia(entrada):
         return StreamingResponse(
             iter([respuesta_emergencia(lugar)]),
+            media_type="text/plain; charset=utf-8",
+        )
+
+    # 3) Documento cargado: solo si la pregunta va dirigida a él y no es una
+    #    consulta de hospitales/IPS (esas siempre las responde datos.gov.co).
+    if _pregunta_del_documento(entrada):
+        respaldo_doc = _cierre(
+            f"Según «{DOCUMENTO.get('nombre', 'el documento')}»: "
+            f"{DOCUMENTO.get('resumen', 'no pude resumirlo.')}"
+        )
+        return StreamingResponse(
+            _stream_limpio(
+                limpiar_markdown(t, trim=False)
+                for t in stream_con_recurso(
+                    prompt_documento(pregunta, historial_texto),
+                    respaldo_doc,
+                    espera=5.0,
+                )
+            ),
             media_type="text/plain; charset=utf-8",
         )
 
