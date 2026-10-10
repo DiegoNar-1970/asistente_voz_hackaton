@@ -1,5 +1,20 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import './App.css'
+import {
+  IconArrowUp,
+  IconArrowUpRight,
+  IconChatTab,
+  IconCheckCircle,
+  IconDoc,
+  IconInfo,
+  IconMic,
+  IconSmileTab,
+  IconSpark,
+  IconSpeaker,
+  IconSpeakerOff,
+  IconTextTab,
+  IconWave,
+} from './icons.jsx'
 
 // En producción sin VITE_API_URL se apunta al backend desplegado; en desarrollo
 // local a la instancia de la máquina (localhost:8000).
@@ -71,6 +86,8 @@ function App() {
   const [horaEscucha, setHoraEscucha] = useState('')
   const [documento, setDocumento] = useState(null)
   const [subiendoDoc, setSubiendoDoc] = useState(false)
+  // Vista activa en iPhone (tab bar). En escritorio se muestran todas a la vez.
+  const [vista, setVista] = useState('chat')
   const archivoRef = useRef(null)
 
   const cargarInicial = useCallback(async () => {
@@ -460,11 +477,13 @@ function App() {
   }
 
   return (
-    <main className="app-shell">
+    <main className="app-shell" data-vista={vista}>
       <header className="topbar">
         <a className="brand" href="#">
-          <span className="brand-icon">✳</span>
-          <span>
+          <span className="brand-icon">
+            <IconWave />
+          </span>
+          <span className="brand-text">
             Vocal<span className="brand-light"> Cognitivo</span>
           </span>
         </a>
@@ -474,8 +493,10 @@ function App() {
             className="voice-toggle"
             onClick={() => setVozActiva((valor) => !valor)}
             aria-label="Activar o desactivar la voz"
+            aria-pressed={vozActiva}
           >
-            {vozActiva ? '🔊 Voz activa' : '🔇 Voz silenciada'}
+            {vozActiva ? <IconSpeaker /> : <IconSpeakerOff />}
+            <span>{vozActiva ? 'Voz activa' : 'Voz silenciada'}</span>
           </button>
           <span className="status">
             <span className="status-dot" />
@@ -484,20 +505,13 @@ function App() {
         </div>
       </header>
 
-      <section className="hero">
-        <span className="eyebrow">ASISTENTE DE SALUD POR VOZ</span>
-        <h1>Tu asistente de salud, siempre disponible.</h1>
-        <p>
-          Háblale con naturalidad, cuéntale qué necesitas y en qué ciudad
-          estás, y te ayudará a encontrar dónde atenderte.
-        </p>
-      </section>
-
-      <section className="workspace">
+      <div className="app-body">
         <aside className="sidebar">
           <div className="doc-card">
             <div className="doc-head">
-              <span className="doc-icon">📄</span>
+              <span className="doc-icon">
+                <IconDoc />
+              </span>
               <div>
                 <strong>Documento</strong>
                 <p>Carga un PDF, DOCX o TXT y pregúntale.</p>
@@ -514,7 +528,10 @@ function App() {
 
             {documento?.cargado ? (
               <div className="doc-ok">
-                <span className="doc-ok-name">✓ {documento.nombre}</span>
+                <span className="doc-ok-name">
+                  <IconCheckCircle />
+                  {documento.nombre}
+                </span>
                 <span className="doc-ok-meta">
                   {documento.caracteres?.toLocaleString('es-CO')} caracteres
                 </span>
@@ -532,11 +549,8 @@ function App() {
           </div>
 
           <div className="section-heading">
-            <span className="step-number">01</span>
-            <div>
-              <h2>¿Cómo te ayudo?</h2>
-              <p>Habla conmigo como con una persona.</p>
-            </div>
+            <h2>¿Cómo te ayudo?</h2>
+            <p>Habla conmigo como con una persona.</p>
           </div>
 
           <div className="summary-card brief-card">
@@ -553,28 +567,44 @@ function App() {
           </ul>
 
           <div className="privacy-note">
-            <span>ⓘ</span>
+            <span className="privacy-icon">
+              <IconInfo />
+            </span>
             <p>
               Te oriento con información oficial de salud. No reemplaza una
               valoración médica.
             </p>
           </div>
+
+          <footer className="app-credit">
+            <span>Vocal Cognitivo · Kognia Labs</span>
+            <span>Asistente de salud por voz</span>
+          </footer>
         </aside>
 
-        <div className="main-panel">
-          <section className="chat-section">
-            <div className="section-heading">
-              <span className="step-number">02</span>
-              <div>
-                <h2>Conversa con la asistente</h2>
-                <p>Mantén pulsado el micrófono, habla y suéltalo al terminar.</p>
-              </div>
+        <section className="chat-section" data-panel="chat">
+          {mensajes.filter((m) => m.texto).length === 0 && (
+            <div className="chat-intro">
+              <span className="eyebrow">ASISTENTE DE SALUD POR VOZ</span>
+              <h1>Tu asistente de salud, siempre disponible.</h1>
+              <p>
+                Háblale con naturalidad, cuéntale qué necesitas y en qué ciudad
+                estás, y te ayudará a encontrar dónde atenderte.
+              </p>
             </div>
+          )}
+
+          <div className="section-heading">
+            <h2>Conversa con la asistente</h2>
+            <p>Mantén pulsado el micrófono, habla y suéltalo al terminar.</p>
+          </div>
 
             <div className="chat-history" aria-live="polite">
               {!inicio && (
                 <div className="start-card">
-                  <span className="chat-sparkle">✳</span>
+                  <span className="chat-sparkle">
+                    <IconSpark />
+                  </span>
                   <strong>Asistente virtual de la IPS</strong>
                   <p>
                     Pulsa para que te salude por voz y te pregunte en qué te
@@ -585,7 +615,8 @@ function App() {
                     className="primary-button start-button"
                     onClick={iniciarAsistente}
                   >
-                    🔈 Iniciar asistente
+                    <IconSpeaker />
+                    Iniciar asistente
                   </button>
                 </div>
               )}
@@ -610,7 +641,8 @@ function App() {
                           type="button"
                           onClick={() => leerEnVozAlta(mensaje.texto)}
                         >
-                          🔈 Escuchar respuesta
+                          <IconSpeaker />
+                          Escuchar respuesta
                         </button>
                       )}
                     </div>
@@ -636,28 +668,37 @@ function App() {
               )}
             </div>
 
-            {inicio && sugerencias.length > 0 && mensajes.length <= 1 && (
-              <div className="suggestion-list inline">
-                {sugerencias.map((item) => (
-                  <button
-                    key={item}
-                    className="suggestion-button"
-                    onClick={() => usarSugerencia(item)}
-                  >
-                    <span>{item}</span>
-                    <span className="suggestion-arrow">↗</span>
-                  </button>
-                ))}
-              </div>
-            )}
+            {inicio &&
+              mensajes.filter((m) => m.texto).length <= 1 &&
+              (preguntas.length > 0 ? preguntas : sugerencias).length > 0 && (
+                <div className="suggestion-list inline">
+                  <p className="chips-hint">Preguntas frecuentes</p>
+                  {(preguntas.length > 0 ? preguntas : sugerencias).map(
+                    (item, index) => (
+                      <button
+                        key={`${index}-${item}`}
+                        className="suggestion-button"
+                        onClick={() => usarSugerencia(item)}
+                        disabled={cargandoRespuesta}
+                      >
+                        <span>{item}</span>
+                        <span className="suggestion-arrow">
+                          <IconArrowUpRight />
+                        </span>
+                      </button>
+                    ),
+                  )}
+                </div>
+              )}
 
-            <form
-              className="chat-form"
-              onSubmit={(event) => {
-                event.preventDefault()
-                enviarPregunta()
-              }}
-            >
+            <div className="chat-composer">
+              <form
+                className="chat-form"
+                onSubmit={(event) => {
+                  event.preventDefault()
+                  enviarPregunta()
+                }}
+              >
               <button
                 className={`mic-button ${escuchando ? 'mic-active' : ''}`}
                 type="button"
@@ -672,7 +713,7 @@ function App() {
                 aria-label="Mantén pulsado para hablar"
                 title="Mantén pulsado para hablar (corta a la asistente)"
               >
-                🎙
+                <IconMic />
               </button>
               <input
                 type="text"
@@ -694,7 +735,7 @@ function App() {
                 disabled={!pregunta.trim() || !inicio}
                 aria-label="Enviar"
               >
-                ↑
+                <IconArrowUp />
               </button>
             </form>
 
@@ -702,41 +743,14 @@ function App() {
               La asistente orienta con información de salud y no reemplaza una
               valoración médica.
             </p>
-          </section>
-
-          <section className="summary-section">
-            <div className="section-heading">
-              <span className="step-number">03</span>
-              <div>
-                <h2>Preguntas frecuentes</h2>
-                <p>Toca una para preguntármela.</p>
-              </div>
-            </div>
-
-            <div className="suggestion-list">
-              {(preguntas.length > 0 ? preguntas : sugerencias).map(
-                (item, index) => (
-                  <button
-                    key={`${index}-${item}`}
-                    className="suggestion-button"
-                    onClick={() => usarSugerencia(item)}
-                    disabled={cargandoRespuesta}
-                  >
-                    <span>{item}</span>
-                    <span className="suggestion-arrow">↗</span>
-                  </button>
-                ),
-              )}
             </div>
           </section>
 
-          <section className="summary-section">
+        <aside className="rail">
+          <section className="summary-section" data-panel="sentimiento">
             <div className="section-heading">
-              <span className="step-number">04</span>
-              <div>
-                <h2>Sentimiento de la conversación</h2>
-                <p>Cómo te sientes mientras hablamos.</p>
-              </div>
+              <h2>Sentimiento de la conversación</h2>
+              <p>Cómo te sientes mientras hablamos.</p>
             </div>
 
             {!analisis ? (
@@ -797,13 +811,10 @@ function App() {
             )}
           </section>
 
-          <section className="summary-section">
+          <section className="summary-section" data-panel="transcripcion">
             <div className="section-heading">
-              <span className="step-number">05</span>
-              <div>
-                <h2>Transcripción diarizada</h2>
-                <p>Hablante y marca de tiempo de cada turno.</p>
-              </div>
+              <h2>Transcripción diarizada</h2>
+              <p>Hablante y marca de tiempo de cada turno.</p>
             </div>
 
             {mensajes.filter((m) => m.texto).length === 0 ? (
@@ -841,8 +852,47 @@ function App() {
               </div>
             )}
           </section>
-        </div>
-      </section>
+        </aside>
+      </div>
+
+      <nav className="tabbar" aria-label="Secciones">
+        <button
+          type="button"
+          className={`tab ${vista === 'chat' ? 'is-active' : ''}`}
+          onClick={() => setVista('chat')}
+          aria-current={vista === 'chat' ? 'page' : undefined}
+        >
+          <IconChatTab />
+          <span>Chat</span>
+        </button>
+        <button
+          type="button"
+          className={`tab ${vista === 'sentimiento' ? 'is-active' : ''}`}
+          onClick={() => setVista('sentimiento')}
+          aria-current={vista === 'sentimiento' ? 'page' : undefined}
+        >
+          <IconSmileTab />
+          <span>Sentimiento</span>
+        </button>
+        <button
+          type="button"
+          className={`tab ${vista === 'transcripcion' ? 'is-active' : ''}`}
+          onClick={() => setVista('transcripcion')}
+          aria-current={vista === 'transcripcion' ? 'page' : undefined}
+        >
+          <IconTextTab />
+          <span>Transcripción</span>
+        </button>
+        <button
+          type="button"
+          className={`tab ${vista === 'documento' ? 'is-active' : ''}`}
+          onClick={() => setVista('documento')}
+          aria-current={vista === 'documento' ? 'page' : undefined}
+        >
+          <IconDoc />
+          <span>Documento</span>
+        </button>
+      </nav>
 
       {error && (
         <div className="error-banner" role="alert">
@@ -852,11 +902,6 @@ function App() {
           </button>
         </div>
       )}
-
-      <footer className="footer">
-        <span>Vocal Cognitivo · Kognia Labs</span>
-        <span>Asistente de salud por voz</span>
-      </footer>
     </main>
   )
 }

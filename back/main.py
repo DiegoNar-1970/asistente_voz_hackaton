@@ -526,36 +526,61 @@ SALUDOS = {
 }
 
 REPLICAS_RAPIDAS = {
-    "hola": (
-        "Hola, ¿cómo estás? Soy la asistente virtual de la IPS. "
-        "Dime en qué te puedo ayudar y en qué ciudad estás."
-    ),
-    "buenas": (
-        "Hola, ¿cómo estás? Soy la asistente virtual de la IPS. "
-        "Dime en qué te puedo ayudar y en qué ciudad estás."
-    ),
-    "buenos dias": (
-        "Buenos días. Soy la asistente virtual de la IPS. "
-        "Cuéntame en qué ciudad estás y qué necesitas."
-    ),
-    "buenas tardes": (
-        "Buenas tardes. Soy la asistente virtual de la IPS. "
-        "Cuéntame en qué ciudad estás y qué necesitas."
-    ),
-    "buenas noches": (
-        "Buenas noches. Soy la asistente virtual de la IPS. "
-        "Cuéntame en qué ciudad estás y qué necesitas."
-    ),
-    "gracias": (
-        "¡Con gusto! Si necesitas otra cosa de salud, dime en qué ciudad estás."
-    ),
-    "grax": "¡Con gusto! Si necesitas otra cosa, dime en qué ciudad estás.",
-    "chao": "Hasta pronto. Recuerda que estoy aquí cuando necesites orientación.",
-    "adios": "Hasta pronto. Recuerda que estoy aquí cuando necesites orientación.",
-    "hasta luego": "Hasta pronto. Estoy aquí cuando me necesites.",
-    "si": "Perfecto. ¿En qué ciudad estás y qué necesitas de salud?",
-    "ok": "Perfecto. ¿En qué ciudad estás y qué necesitas de salud?",
-    "listo": "Perfecto. ¿En qué ciudad estás y qué necesitas de salud?",
+    # Cada respuesta tiene variantes para que nunca suene a bot repetitivo.
+    "hola": [
+        "Hola, ¿qué tal? Soy la asistente de la IPS. ¿En qué ciudad estás y qué necesitas?",
+        "¡Hola! Aquí estoy para ayudarte con lo de salud. ¿Dónde estás y qué buscas?",
+        "Hola, ¿cómo estás? Cuéntame en qué ciudad estás y qué necesitas y te busco.",
+    ],
+    "buenas": [
+        "¡Buenas! Soy la asistente de la IPS. ¿Qué necesitas y en qué ciudad estás?",
+        "Buenas, ¿qué tal? Dime qué buscas y dónde estás y lo vemos ya.",
+    ],
+    "buenos dias": [
+        "Buenos días. Cuéntame qué necesitas y en qué ciudad estás y te ayudo.",
+        "Buenos días, ¿cómo amaneciste? Aquí estoy para lo que necesites de salud.",
+    ],
+    "buenas tardes": [
+        "Buenas tardes. ¿Qué necesitas y en qué ciudad estás? Vamos con eso.",
+        "Buenas tardes, ¿cómo vas? Dime qué buscas y te lo ubico ya.",
+    ],
+    "buenas noches": [
+        "Buenas noches. ¿En qué te puedo ayudar y en qué ciudad estás?",
+        "Buenas noches, aquí sigo. ¿Qué necesitas y dónde estás?",
+    ],
+    "gracias": [
+        "¡De nada! Si se te ocurre otra cosa, aquí sigo.",
+        "Cuando quieras. ¿Seguimos buscando algo más?",
+        "Un placer. Cualquier otra duda de salud, aquí estoy.",
+    ],
+    "grax": [
+        "¡De nada! Si se te ocurre otra cosa, aquí sigo.",
+        "Cuando quieras. ¿Seguimos buscando algo más?",
+    ],
+    "chao": [
+        "Hasta pronto, que te vaya bien. Aquí estaré cuando me necesites.",
+        "Nos vemos. Cualquier cosa de salud, ya sabes dónde encontrarme.",
+    ],
+    "adios": [
+        "Hasta pronto, que te vaya bien. Aquí estaré cuando me necesites.",
+        "Un abrazo. Vuelve cuando quieras con otra pregunta.",
+    ],
+    "hasta luego": [
+        "Hasta luego. Aquí quedo pendiente por si surge algo.",
+        "Nos vemos. Cuando necesites, aquí estaré.",
+    ],
+    "si": [
+        "Perfecto, dime la ciudad y qué necesitas y arrancamos.",
+        "Genial. ¿En qué ciudad estás y qué buscas?",
+    ],
+    "ok": [
+        "Dale. ¿En qué ciudad estás y qué necesitas?",
+        "Perfecto, cuéntame qué buscas y dónde estás.",
+    ],
+    "listo": [
+        "Dale. ¿En qué ciudad estás y qué necesitas?",
+        "Perfecto, cuéntame qué buscas y dónde estás.",
+    ],
 }
 
 
@@ -563,6 +588,34 @@ PALABRAS_SALUDO = {
     "hola", "holi", "hey", "oye", "buenas", "buenos", "dias", "tardes",
     "noches", "que", "mas", "como", "estas", "todo", "bien", "saludos",
 }
+
+
+def _variante(valor) -> str:
+    """Cada lista de REPLICAS_RAPIDAS guarda alternativas: elegimos una para
+    que la asistente no repita siempre la misma frase."""
+    if isinstance(valor, (list, tuple)):
+        return random.choice(valor)
+    return valor
+
+
+# Frases que suenan a bot y ya se usaron demasiadas veces: se eliminan del
+# final de cualquier respuesta antes de entregarla.
+FRASES_GASTADAS = [
+    "hay algo más en que te pueda ayudar",
+    "hay algo más que te pueda ayudar",
+    "hay algo más que necesites",
+    "en qué más puedo ayudarte",
+    "en qué más te puedo ayudar",
+    "te puedo ayudar con algo más",
+    "necesitas algo más",
+    "algo más en que te pueda ayudar",
+]
+FRASE_GASTADA = re.compile(
+    r"[\s,;.!?]*\W?\s*(?:"
+    + "|".join(re.escape(frase) for frase in FRASES_GASTADAS)
+    + r")\s*[?.!]?\s*$",
+    re.I,
+)
 
 # Emergencias: la respuesta correcta no es buscar en la base de datos.
 PATRON_EMERGENCIA = re.compile(
@@ -631,8 +684,18 @@ def _sin_pedir_ciudad(texto: str) -> str:
 def respuesta_rapida(texto: str) -> str | None:
     texto = texto.strip().rstrip("!.¿¡")
     texto = normalizar(texto).strip()
+    palabras = texto.split()
+
+    # Agradecimientos y despedidas con adornos ("gracias, ya me serviste de
+    # mucho"): si pasaran por Gemini terminarían en la fórmula de siempre.
+    if palabras and len(palabras) <= 10:
+        if re.match(r"^(?:muchas\s+)?graci[ae]s\b", texto):
+            return _variante(REPLICAS_RAPIDAS["gracias"])
+        if re.match(r"^(?:chao|adios|hasta luego|nos vemos|bye)\b", texto):
+            return _variante(REPLICAS_RAPIDAS["chao"])
+
     if texto in REPLICAS_RAPIDAS:
-        return REPLICAS_RAPIDAS[texto]
+        return _variante(REPLICAS_RAPIDAS[texto])
 
     # Saludos pegados o con adornos: "Hola, buenas", "Buenas, ¿cómo estás?".
     # Solo cuando TODAS las palabras son de saludo, para no interferir con
@@ -643,7 +706,7 @@ def respuesta_rapida(texto: str) -> str | None:
         and len(palabras) <= 5
         and all(palabra in PALABRAS_SALUDO for palabra in palabras)
     ):
-        return REPLICAS_RAPIDAS.get(texto) or REPLICAS_RAPIDAS["hola"]
+        return _variante(REPLICAS_RAPIDAS["hola"])
 
     return None
 
@@ -820,44 +883,58 @@ def prompt_redaccion(
         else f"RESULTADOS ({len(filas)} filas):"
     )
     return f"""
-Eres la asistente virtual de salud de una IPS en Colombia. Hablas en español,
-cercana y humana, como si ayudaras a una persona por voz.
+Eres la asistente de salud de una IPS en Colombia. Hablas con personas que
+preguntan por voz o por mensaje. Eres cercana, clara y segura: suenas a una
+persona competente que de verdad quiere ayudar, no a un catálogo ni a un bot
+que lee una ficha.
 
-REGLAS ESTRICTAS:
-- Solo puedes informar lo que aparece en los RESULTADOS. No inventes nombres,
+CÓMO HABLAS:
+- NUNCA termines con "¿Hay algo más en que te pueda ayudar?", "¿En qué más
+  puedo ayudarte?" ni "¿Necesitas algo más?". Esas frases están prohibidas.
+  Cierra siempre con algo concreto del tema que trató.
+- NUNCA empieces con "Hola", "Buenos días", "Claro que sí", "Entendido" ni
+  "Por supuesto": ya hubo saludo, ve al grano.
+- Conecta con lo que el usuario acaba de decir. Si menciona a un familiar o a
+  una situación ("es para mi mamá", "lo necesito por la noche"), reconócelo en
+  una frase antes de dar los datos: "Entonces, para tu mamá...". Nunca des
+  diagnósticos ni medicamentos.
+- Varía siempre la forma de empezar. No arranques dos veces seguidas con la
+  misma estructura: si la última vez fue "En Medellín tenemos...", ahora
+  empieza de otra forma ("Claro, te cuento...", "Para eso...", "Justo hay
+  varias opciones...", "Ahí van...").
+- Escribe como se habla: frases naturales, conectores, sin tono telegráfico.
+  Se vale una introducción corta si aporta; no vale relleno vacío ni
+  cortesías repetidas.
+- MÁXIMO 3 sedes y 90 palabras por defecto, aunque te pongan muchos datos.
+  Solo amplía a más sedes si el usuario lo pide expresamente. Nunca repitas
+  una dirección ya mencionada en la conversación.
+- Termina con algo útil para EL TEMA que preguntó: un paso siguiente concreto
+  relacionado con lo que acaba de ver ("¿Te ubico la más cercana?", "Si es de
+  noche, llama antes de ir"), nunca la misma fórmula de siempre. Que cada
+  cierre distinto tenga sentido con lo anterior.
+
+LO QUE NUNCA HACES:
+- Solo informas lo que aparece en los RESULTADOS. No inventes nombres,
   direcciones, teléfonos ni cantidades.
-- No des diagnósticos ni medicamentos. Un consejo práctico (llamar antes de ir,
-  verificar horarios, traer la cédula o la carnetización) sí está permitido.
-- Si el dato no está en los RESULTADOS, dilo con naturalidad. Nunca afirmes
-  que "no contamos con ese servicio" ni que "no está disponible": solo di que
-  no aparece en los datos disponibles.
-- Si te preguntan qué hacer, orienta con lo que sí sabes (dónde ir, qué
-  llevar, a quién llamar). No respondas con un "no tengo información" seco.
-  Para una urgencia vital, siempre: llama al 123 o ve a urgencias.
-- Entre 2 y 4 frases en total y máximo 60 palabras. Por defecto da como mucho
-  2 o 3 sedes de ejemplo: es mejor una respuesta corta que una larga. Si el
-  usuario pide más, otros, otras o "la lista completa", amplía a varias sedes
-  (hasta 8) y da SIEMPRE sedes distintas a las que ya aparecen en la
-  conversación: nunca repitas una dirección que ya mencionaste. Con más sedes
-  puedes llegar a 100 palabras. Sin markdown, sin asteriscos, sin viñetas,
+- No das diagnósticos ni medicamentos. Un consejo práctico (llamar antes de
+  ir, verificar horarios, llevar la cédula o la carnetización) sí está bien.
+- Si el dato no está en los RESULTADOS, dilo con naturalidad: no es que "no
+  lo tenemos", es que no aparece en los datos disponibles.
+- Nunca digas "no contamos con ese servicio" ni "no está disponible".
+- Si te preguntan qué hacer, orienta con lo que sí sabes: dónde ir, qué
+  llevar, a quién llamar. Para una urgencia vital, siempre: llama al 123 o ve
+  a urgencias.
+- No vuelvas a saludar ni empieces con "Hola", "Buenos días" ni "Claro que
+  sí" vacíos. Tampoco cierres con "¿Hay algo más en que te pueda ayudar?".
+- Responde SIEMPRE en español. Sin markdown, sin asteriscos, sin viñetas,
   sin emojis.
-- Responde SIEMPRE en español.
-- IMPORTANTE: NO vuelvas a saludar. No empieces con "Hola", "Buenos días",
-  "Claro que sí" ni frases de cortesía vacías. Ya hubo un saludo al inicio.
-  Ve directo al contenido de la respuesta.
-- Para cerrar, NO uses "¿Hay algo más en que te pueda ayudar?". Termina con
-  UNA frase que haga avanzar la conversación: una pregunta breve sobre lo
-  siguiente que le pueda servir, o un consejo práctico corto. Varía siempre.
-  Ejemplos: "Si quieres te busco las que atiendan de noche.",
-  "Te recomiendo llamar antes de ir para confirmar horario.",
-  "¿Quieres que te compare con las de tu aseguradora?"
-- Si la pregunta tiene varias partes (por ejemplo "¿cuántos hay? y dame la
-  dirección"), responde TODAS las partes, no solo una. Si pide 1 o 2
-  ejemplos, da exactamente esa cantidad.
-- Si los RESULTADOS traen varias CIUDAD, responde la información de cada una,
-  diciendo a cuál pertenece cada dato. Si alguna ciudad aparece sin
-  registros, dilo con naturalidad: "no aparecen registros para X en los datos
-  disponibles" (nunca digas que no lo tenemos ni que no existe).
+
+SI LA PREGUNTA TIENE VARIAS PARTES:
+- Responde TODAS. Si pide 1 o 2 ejemplos, da exactamente esa cantidad.
+- Si los RESULTADOS traen varias CIUDAD, explica a cuál pertenece cada dato.
+  Si alguna ciudad aparece sin registros, dilo con naturalidad: "no aparecen
+  registros para X en los datos disponibles" (nunca digas que no lo tenemos
+  ni que no existe).
 {memoria_aviso}
 CONVERSACIÓN PREVIA:
 {historial or "(sin turnos previos)"}
@@ -915,8 +992,8 @@ def health():
 def greeting():
     return {
         "mensaje": (
-            "Hola, ¿cómo estás? Soy la asistente virtual de la IPS. "
-            "Dime en qué te puedo ayudar y en qué ciudad estás."
+            "Hola, ¿cómo estás? Soy la asistente de la IPS. "
+            "Cuéntame qué necesitas y en qué ciudad estás, y te busco las sedes."
         ),
         "sugerencias": [
             "¿Cuál es la clínica más cercana donde estoy?",
@@ -1154,41 +1231,52 @@ def extraer_memoria(historial: list[dict]) -> dict:
 
 CIERRES = [
     "",
-    " ¿Quieres que te busque las que atiendan de noche?",
-    " Te recomiendo llamar antes de ir para confirmar el horario.",
-    " ¿Te muestro otras opciones en la misma ciudad?",
-    " Si quieres, te doy los teléfonos de esas sedes.",
-    " ¿Comparo con las de tu aseguradora?",
-    " Recuerda llevar tu cédula y la carnetización.",
-    " ¿Te parece si buscamos algo más cercano a ti?",
-    " Puedo filtrar por las que estén abiertas ahora.",
     "",
+    "",
+    "",
+    " ¿Te ubico la más cercana?",
+    " ¿Quieres que filtre por las que atiendan de noche?",
+    " Si quieres, te paso los teléfonos de esas.",
+    " ¿La busco por barrio o por la que te quede más fácil?",
+    " Dime si es para ti o para alguien más y afino.",
+    " ¿Te sirve con esa o quieres otra opción?",
+    " ¿Te digo cómo llegar?",
+    " ¿Comparo con las de tu aseguradora?",
 ]
 
 
 def _cierre(texto: str) -> str:
     """Cierre de continuidad: sugiere el siguiente paso o da un consejo.
 
-    A veces se omite para no repetir la misma fórmula en cada respuesta.
+    Además limpia las fórmulas gastadas que a veces aparecen al final y añade
+    un cierre distinto en cada respuesta.
     """
     texto = texto.strip()
-    if re.search(
-        r"ay algo m[áa]s|en que te pueda ayudar|en qu[ée] m[áa]s|"
-        r"te puedo ayudar con algo m[áa]s|necesitas algo m[áa]s|"
-        r"quiere que te busque|quiere que te muestre|te busco|te muestro|"
-        r"quieres las direcciones|te muestro las dos|te doy los tel[ée]fonos",
-        texto,
-        re.I,
-    ):
-        return texto
+    # Fórmulas gastadas: se recortan del final (el modelo a veces las suelta).
+    texto = FRASE_GASTADA.sub("", texto).strip()
     if texto and texto[-1] not in ".!?":
         texto += "."
     # Cortesía de longitud: nadie quiere escuchar una respuesta interminable.
-    if len(texto) > 430:
-        trozo = texto[:430]
+    if len(texto) > 700:
+        trozo = texto[:700]
         corte = max(trozo.rfind(". "), trozo.rfind(", "))
-        texto = (trozo[:corte] if corte > 220 else trozo).rstrip() + "…"
+        texto = (trozo[:corte] if corte > 400 else trozo).rstrip() + "…"
     return f"{texto}{random.choice(CIERRES)}"
+
+
+def _stream_limpio(generador, atraso: int = 70):
+    """Retiene los últimos caracteres del stream para poder cortar una frase
+    gastada antes de que llegue al navegador: el modelo a veces la suelta
+    pese a estar prohibida en el prompt."""
+    retenido = ""
+    for trozo in generador:
+        retenido += trozo
+        if len(retenido) > atraso:
+            yield retenido[:-atraso]
+            retenido = retenido[-atraso:]
+    limpio = FRASE_GASTADA.sub("", retenido).strip()
+    if limpio:
+        yield limpio
 
 
 def _datos_lugar(
@@ -1251,7 +1339,7 @@ def chat(datos: PreguntaRequest):
             f"{DOCUMENTO.get('resumen', 'no pude resumirlo.')}"
         )
         return StreamingResponse(
-            (
+            _stream_limpio(
                 limpiar_markdown(t, trim=False)
                 for t in stream_con_recurso(
                     prompt_documento(pregunta, historial_texto),
@@ -1320,7 +1408,7 @@ def chat(datos: PreguntaRequest):
         )
         respaldo = _cierre(_resumen_varias_ciudades(pasos))
         return StreamingResponse(
-            (
+            _stream_limpio(
                 limpiar_markdown(t, trim=False)
                 for t in stream_con_recurso(prompt, respaldo, espera=5.0)
             ),
@@ -1395,7 +1483,10 @@ def chat(datos: PreguntaRequest):
             filas, ciudad, servicio or "atención médica"
         ))
         return StreamingResponse(
-            (limpiar_markdown(t, trim=False) for t in stream_con_recurso(prompt, respaldo)),
+            _stream_limpio(
+                limpiar_markdown(t, trim=False)
+                for t in stream_con_recurso(prompt, respaldo)
+            ),
             media_type="text/plain; charset=utf-8",
         )
 
